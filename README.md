@@ -28,5 +28,5 @@ If you find the code helpful in your resarch or work, please consider citing:
 
 ## Acknowledgement
 Many thanks to the contributors of these excellent works to BMNet:
--[SCI3D](https://github.com/jianzhangcs/SCI3D) 
--[Restormer](https://github.com/swz30/Restormer)
+- [SCI3D](https://github.com/jianzhangcs/SCI3D) 
+- [Restormer](https://github.com/swz30/Restormer)

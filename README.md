@@ -27,6 +27,6 @@ If you find the code helpful in your resarch or work, please consider citing:
     }
 
 ## Acknowledgement
-Many thanks to the contributors of these excellent works to BMNet:
+Many thanks to the contributions of these excellent works:
 - [SCI3D](https://github.com/jianzhangcs/SCI3D) 
 - [Restormer](https://github.com/swz30/Restormer)

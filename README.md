@@ -6,3 +6,8 @@ Zhibin Wang, Yanxin Cai, Jiayi Zhou, Yangming Zhang, Tianyu Li, Wei Li, Xun Liu,
 ![encode](fig/encode.jpg)
 
 Figure 1: Satellite-side optical encoding for compression and ground-based deep unfolding decoding for reconstruction.
+
+## Decoding Framework
+![decode](fig/decode.jpg)
+
+Figure 2: Satellite-side optical encoding for compression and ground-based deep unfolding decoding for reconstruction.

@@ -26,13 +26,13 @@ Figure 2: (a) BMNet processes the measurement $Y$ alongside the mask $M$, and re
     <tbody>
         <tr>
             <td>DOTA-v1.0</td>
-            <td>[Baidu](https://pan.baidu.com/s/1WR8CfBlG7lVlexVKkeYBDA?pwd=izw7)</td>
-            <td>[Baidu](https://pan.baidu.com/s/1Y3SXLfyJsrPaKl8RkWq8MA?pwd=csts)</td>
+            <td><a href="https://pan.baidu.com/s/1WR8CfBlG7lVlexVKkeYBDA?pwd=izw7">Baidu</a></td>
+            <td><a href="https://pan.baidu.com/s/1Y3SXLfyJsrPaKl8RkWq8MA?pwd=csts">Baidu</a></td>
         </tr>
         <tr>
             <td>LandSat-8</td>
             <td>-</td>
-            <td>[Baidu](https://pan.baidu.com/s/10hODPzK__8aTA4PHAPmxbg?pwd=x9xa)</td>
+            <td><a href="https://pan.baidu.com/s/10hODPzK__8aTA4PHAPmxbg?pwd=x9xa">Baidu</a></td>
         </tr>
     </tbody>
 </table>

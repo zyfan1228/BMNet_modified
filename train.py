@@ -25,7 +25,7 @@ import einops
 
 cudnn.benchmark = True
 
-parser = ArgumentParser(description='PreSOE')
+parser = ArgumentParser(description='BMI')
 
 parser.add_argument('--warmup_steps', type=int, default=5, help='epoch number of learnig rate warmup')
 parser.add_argument('--start_epoch', type=int, default=0, help='epoch number of start training')

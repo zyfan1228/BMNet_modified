@@ -18,27 +18,27 @@ Figure 2: (a) BMNet processes the measurement $Y$ alongside the mask $M$, and re
 <table>
     <thead>
         <tr>
-            <th>dataset</th>
-            <th>train</th>
-            <th>val</th>
+            <th>Dataset</th>
+            <th>Train</th>
+            <th>Val</th>
         </tr>
     </thead>
     <tbody>
         <tr>
-            <td>dota-v1.0</td>
-            <td>vv</td>
-            <td>vv</td>
+            <td>DOTA-v1.0</td>
+            <td>[Baidu](https://pan.baidu.com/s/1WR8CfBlG7lVlexVKkeYBDA?pwd=izw7)</td>
+            <td>[Baidu](https://pan.baidu.com/s/1Y3SXLfyJsrPaKl8RkWq8MA?pwd=csts)</td>
         </tr>
         <tr>
-            <td>landsat-8</td>
-            <td>vv</td>
-            <td>vv</td>
+            <td>LandSat-8</td>
+            <td>-</td>
+            <td>[Baidu](https://pan.baidu.com/s/10hODPzK__8aTA4PHAPmxbg?pwd=x9xa)</td>
         </tr>
     </tbody>
 </table>
 
 ## Training and Evaluation
-Coming soon.
+### Training
 
 ## Citation
 If you find the code helpful in your resarch or work, please consider citing:

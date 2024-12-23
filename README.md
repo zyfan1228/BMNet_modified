@@ -39,6 +39,15 @@ Figure 2: (a) BMNet processes the measurement $Y$ alongside the mask $M$, and re
 
 ## Training and Evaluation
 ### Training
+To train BMNet with 4 GPUs at a compression ratio of 16:
+```
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --master_port 4566 --nproc_per_node=4 train.py --batch_size 4 --learning_rate 5e-6 --image_size 512 512 --num_stage 10 --cs_ratio 4 4 --warmup_steps 5 --opt-level O1 --end_epoch 100 --data_path /data2/wangzhibin/DOTA/trainsplit512_nogap/images/ --save_dir ./model_ckpt/
+```
+
+To test BMNet at a compression ratio of 16:
+```
+python eval.py --image_size 512 512 --cs_ratio 4 4 --model_path ./model_ckpt/2024_12_11_22_07_45/model_best.pth --num_shows 10 --results_path ./results/
+```
 
 ## Citation
 If you find the code helpful in your resarch or work, please consider citing:

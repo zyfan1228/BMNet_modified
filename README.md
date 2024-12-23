@@ -46,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --master_port 45
 
 To test BMNet at a compression ratio of 16:
 ```
-python eval.py --image_size 512 512 --cs_ratio 4 4 --model_path ./model_ckpt/2024_12_11_22_07_45/model_best.pth --num_shows 10 --results_path ./results/
+python eval.py --image_size 512 512 --cs_ratio 4 4 --data_path /data2/wangzhibin/DOTA/valsplit512_nogap/images/ --model_path ./model_ckpt/2024_12_11_22_07_45/model_best.pth --num_shows 10 --results_path ./results/
 ```
 
 ## Citation

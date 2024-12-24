@@ -56,7 +56,7 @@ To test BMNet at a compression ratio of 16:
 python eval.py --image_size 512 512 --cs_ratio 4 4 --data_path /data2/wangzhibin/DOTA/valsplit512_nogap/images/ --model_path ./model_ckpt/2024_12_11_22_07_45/model_best.pth --num_shows 10 --results_path ./results/
 ```
 
-## Citation
+<!--## Citation
 If you find the code helpful in your resarch or work, please consider citing:
 
     @inproceedings{xxxxxxx,
@@ -65,7 +65,7 @@ If you find the code helpful in your resarch or work, please consider citing:
         booktitle={xxxx},
         year={2024}
     }
-
+-->
 ## Acknowledgement
 Many thanks to the contributions of these excellent works:
 - [SCI3D](https://github.com/jianzhangcs/SCI3D) 

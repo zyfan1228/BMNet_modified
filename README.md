@@ -1,7 +1,7 @@
 # Ultra-Low Complexity On-Orbit Compression for Remote Sensing Imagery via Block Modulated Imaging
 Zhibin Wang, Yanxin Cai, Jiayi Zhou, Yangming Zhang, Tianyu Li, Wei Li, Xun Liu, Guoqing Wang, and Yang Yang
 
-<!--[![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)]()-->
+[![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/2412.18417)
 
 
 ## Encoding Framework
@@ -56,16 +56,19 @@ To test BMNet at a compression ratio of 16:
 python eval.py --image_size 512 512 --cs_ratio 4 4 --data_path /data2/wangzhibin/DOTA/valsplit512_nogap/images/ --model_path ./model_ckpt/2024_12_11_22_07_45/model_best.pth --num_shows 10 --results_path ./results/
 ```
 
-<!--## Citation
+## Citation
 If you find the code helpful in your resarch or work, please consider citing:
 
-    @inproceedings{xxxxxxx,
-        title={Ultra-Low Complexity On-Orbit Compression for Remote Sensing Imagery via Block Modulated Imaging}, 
-        author={Zhibin Wang, Yanxin Cai, Jiayi Zhou, Yangming Zhang, Tianyu Li, Wei Li, Xun Liu, Guoqing Wang, and Yang Yang},
-        booktitle={xxxx},
-        year={2024}
-    }
--->
+@misc{wang2024ultralowcomplexityonorbitcompression,
+      title={Ultra-Low Complexity On-Orbit Compression for Remote Sensing Imagery via Block Modulated Imaging}, 
+      author={Zhibin Wang and Yanxin Cai and Jiayi Zhou and Yangming Zhang and Tianyu Li and Wei Li and Xun Liu and Guoqing Wang and Yang Yang},
+      year={2024},
+      eprint={2412.18417},
+      archivePrefix={arXiv},
+      primaryClass={eess.IV},
+      url={https://arxiv.org/abs/2412.18417}, 
+}
+
 ## Acknowledgement
 Many thanks to the contributions of these excellent works:
 - [SCI3D](https://github.com/jianzhangcs/SCI3D) 

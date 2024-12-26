@@ -58,16 +58,17 @@ python eval.py --image_size 512 512 --cs_ratio 4 4 --data_path /data2/wangzhibin
 
 ## Citation
 If you find the code helpful in your resarch or work, please consider citing:
-
-@misc{wang2024ultralowcomplexityonorbitcompression,
-      title={Ultra-Low Complexity On-Orbit Compression for Remote Sensing Imagery via Block Modulated Imaging}, 
-      author={Zhibin Wang and Yanxin Cai and Jiayi Zhou and Yangming Zhang and Tianyu Li and Wei Li and Xun Liu and Guoqing Wang and Yang Yang},
-      year={2024},
-      eprint={2412.18417},
-      archivePrefix={arXiv},
-      primaryClass={eess.IV},
-      url={https://arxiv.org/abs/2412.18417}, 
-}
+```
+    @misc{wang2024ultralowcomplexityonorbitcompression,
+          title={Ultra-Low Complexity On-Orbit Compression for Remote Sensing Imagery via Block Modulated Imaging}, 
+          author={Zhibin Wang and Yanxin Cai and Jiayi Zhou and Yangming Zhang and Tianyu Li and Wei Li and Xun Liu and Guoqing Wang and Yang Yang},
+          year={2024},
+          eprint={2412.18417},
+          archivePrefix={arXiv},
+          primaryClass={eess.IV},
+          url={https://arxiv.org/abs/2412.18417}, 
+    }
+```
 
 ## Acknowledgement
 Many thanks to the contributions of these excellent works:

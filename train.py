@@ -1,27 +1,29 @@
-import torch
-import numpy as np
 import os
 import time
+
+import torch
+import numpy as np
 import datetime
+import einops
 import shutil
+from PIL import Image
 from tqdm import tqdm
 from argparse import ArgumentParser
 import tensorboardX
 import torch.nn as nn
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
-from PIL import Image
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
+from timm.scheduler import CosineLRScheduler
 
 from data.dotadataset import make_dataset
 from utils import batch_PSNR, time2file_name, AverageMeter
 from network.BMNet import BMNet
-from timm.scheduler import CosineLRScheduler
-import einops
+
 
 cudnn.benchmark = True
 

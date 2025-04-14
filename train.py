@@ -1,14 +1,15 @@
 import os
 import time
+import shutil
+import datetime
+from argparse import ArgumentParser
 
 import torch
 import numpy as np
-import datetime
 import einops
-import shutil
+from apex import amp
 from PIL import Image
 from tqdm import tqdm
-from argparse import ArgumentParser
 import tensorboardX
 import torch.nn as nn
 import torch.distributed as dist
@@ -16,8 +17,7 @@ import torch.backends.cudnn as cudnn
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from apex import amp
-from apex.parallel import DistributedDataParallel as DDP
+from torch.nn.parallel import DistributedDataParallel as DDP
 from timm.scheduler import CosineLRScheduler
 
 from data.dotadataset import make_dataset
@@ -25,77 +25,35 @@ from utils import batch_PSNR, time2file_name, AverageMeter
 from network.BMNet import BMNet
 
 
-cudnn.benchmark = True
-
-parser = ArgumentParser(description='BMI')
-
-parser.add_argument('--warmup_steps', type=int, default=5, help='epoch number of learnig rate warmup')
-parser.add_argument('--start_epoch', type=int, default=0, help='epoch number of start training')
-parser.add_argument('--end_epoch', type=int, default=100, help='epoch number of end training')
-parser.add_argument('--learning_rate', type=float, default=5e-6, help='learning rate')
-parser.add_argument('--batch_size', type=int, default=1, help='batch size')
-parser.add_argument('--image_size', type=int, nargs='+', default=[512, 512], help='image size')
-parser.add_argument('--resize_size', type=int, nargs='+', default=None, help='resize the image to fit the compression ratio')
-parser.add_argument('--n_channels', type=int, default=1, help='1 for gray image, currently only support 1')
-parser.add_argument("--cs_ratio", type=int, nargs='+', default=[4, 4], help="compression ratio")
-parser.add_argument('--num_stage', type=int, default=10, help='satge number of the DUN')
-parser.add_argument('--scaler', action='store_true', help='whether add scaler to mask')
-parser.add_argument('--lm', action='store_true', help='whether learnable mask')
-parser.add_argument('--use_checkpoint', action='store_true', help='whether use torch checkpoint to save memory')
-
-parser.add_argument('--save_interval', type=int, default=5, help='save model on test set every x epochs')
-parser.add_argument("--test_interval", type=int, default=1, help='evaluate model on test set every x epochs')
-parser.add_argument("--data_path", type=str, default="/data2/wangzhibin/DOTA/trainsplit512_nogap/images/", help='path to dota dataset')
-parser.add_argument('--save_dir', type=str, default='./model_ckpt', help='output dir')
-parser.add_argument('--finetune', type=str, default=None, help='resume path')
-parser.add_argument('--resume', type=str, default=None, help='resume path')
-
-parser.add_argument('--opt-level', type=str, default='O0', help='use fp32 or fp16')
-parser.add_argument("--local_rank", default=0, type=int)
-parser.add_argument("--seed", default=42, type=int)
-args = parser.parse_args()
-
-start_epoch = args.start_epoch
-end_epoch = args.end_epoch
-batch_size = args.batch_size
-best_psnr = 0.
-
-args.local_rank = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
-args.world_size = int(os.getenv('WORLD_SIZE', 1))
-
-if args.local_rank != -1:
-    torch.cuda.set_device(args.local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://')
-
-# scale learning_rate according to total_batch_size
-total_batch_size = args.world_size * args.batch_size
-args.learning_rate = args.learning_rate * float(total_batch_size)
-args.init_learning_rate = args.learning_rate / 5.
-args.min_learning_rate = args.learning_rate / 100.
-
-cr1, cr2 = args.cs_ratio
-
-
-g = torch.Generator()
-g.manual_seed(args.seed)
-
-mask = torch.bernoulli(torch.empty(cr1 * cr2, 1, args.image_size[0] // cr1, args.image_size[1] // cr2).uniform_(0, 1), generator=g)
-if args.resize_size:
-    mask = torch.bernoulli(torch.empty(cr1 * cr2, 1, args.resize_size[0] // cr1, args.resize_size[1] // cr2).uniform_(0, 1), generator=g)
-
-
-def main():
+def main(args):
     train_dir = args.data_path
     test_dir = train_dir.replace('train', 'val')
-    train_dataset, test_dataset = make_dataset(train_dir, test_dir, cr=max(args.cs_ratio), seed=args.seed)
+    train_dataset, test_dataset = make_dataset(train_dir, 
+                                               test_dir, 
+                                               cr=max(args.cs_ratio), 
+                                               seed=args.seed)
 
     if args.local_rank != -1:
-        sampler = DistributedSampler(train_dataset, num_replicas=args.world_size, rank=args.local_rank, shuffle=True)
-        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler, pin_memory=True, num_workers=8)
-    else:
-        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True,
+        sampler = DistributedSampler(train_dataset, 
+                                     num_replicas=args.world_size, 
+                                     rank=args.local_rank, 
+                                     shuffle=True)
+        train_dataloader = DataLoader(train_dataset, 
+                                      batch_size=args.batch_size, 
+                                      sampler=sampler, 
+                                      pin_memory=True, 
                                       num_workers=8)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
+    else:
+        train_dataloader = DataLoader(train_dataset, 
+                                      batch_size=args.batch_size, 
+                                      shuffle=True, 
+                                      pin_memory=True,
+                                      num_workers=8)
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=args.batch_size, 
+                                 shuffle=False, 
+                                 num_workers=2,
+                                 pin_memory=True)
 
     # model defination
     model = BMNet(
@@ -115,7 +73,9 @@ def main():
         if os.path.isfile(checkpoint_filename):
             print("=> loading weights '{}'".format(checkpoint_filename))
             checkpoint = torch.load(checkpoint_filename, map_location='cpu')
-            checkpoint['state_dict'] = {k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()}
+            checkpoint['state_dict'] = {
+                k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()
+            }
             del checkpoint['mask']
             if 'mask' in checkpoint['state_dict']:
                 del checkpoint['state_dict']['mask']
@@ -164,7 +124,9 @@ def main():
                 print("=> loading checkpoint '{}'".format(checkpoint_filename))
                 checkpoint = torch.load(checkpoint_filename, map_location='cpu')
                 if not isinstance(model, DDP):
-                    checkpoint['state_dict'] = {k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()}
+                    checkpoint['state_dict'] = {
+                        k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()
+                    }
                 global best_psnr
                 best_psnr = checkpoint['best_psnr']
                 model.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -206,10 +168,13 @@ def main():
             else:
                 input_img = img_train
 
-            input_img = einops.rearrange(input_img, "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", cr1=cr1, cr2=cr2)
+            input_img = einops.rearrange(input_img, 
+                                         "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
+                                         cr1=cr1, cr2=cr2)
 
             if isinstance(model, DDP):
-                input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.module.scaler
+                input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) \
+                    * model.module.scaler
             else:
                 input_mask = model.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.scaler
 
@@ -239,7 +204,8 @@ def main():
                 writer.add_scalar('psnr', psnr_train.item(), iter)
                 writer.add_scalar('recon_loss', loss.item(), iter)
                 print("%s [epoch %d][%d/%d] recon_loss: %.4f PSNR_train: %.2f dB" %
-                      (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), epoch_i, i, len(train_dataloader),
+                      (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
+                       epoch_i, i, len(train_dataloader),
                        loss.item(), psnr_train.item()))
                 # print(model.module.mask[0][0][0][:5])
             # break
@@ -268,9 +234,12 @@ def main():
                     test = data[0, :]
                     writer.add_image(f'img_{show_test}', test)
 
-                input_img = einops.rearrange(input_img, "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", cr1=cr1, cr2=cr2)
+                input_img = einops.rearrange(input_img, 
+                                             "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
+                                             cr1=cr1, cr2=cr2)
                 if isinstance(model, DDP):
-                    input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.module.scaler
+                    input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) \
+                        * model.module.scaler
                 else:
                     input_mask = model.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.scaler
                 meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
@@ -331,4 +300,70 @@ def reduce_tensor(tensor):
 
 
 if __name__ == "__main__":
-    main()
+    cudnn.benchmark = True
+
+    parser = ArgumentParser(description='BMI')
+
+    parser.add_argument('--warmup_steps', type=int, default=5, 
+                        help='epoch number of learnig rate warmup')
+    parser.add_argument('--start_epoch', type=int, default=0, help='epoch number of start training')
+    parser.add_argument('--end_epoch', type=int, default=100, help='epoch number of end training')
+    parser.add_argument('--learning_rate', type=float, default=5e-6, help='learning rate')
+    parser.add_argument('--batch_size', type=int, default=1, help='batch size')
+    parser.add_argument('--image_size', type=int, nargs='+', default=[512, 512], help='image size')
+    parser.add_argument('--resize_size', type=int, nargs='+', default=None, 
+                        help='resize the image to fit the compression ratio')
+    parser.add_argument('--n_channels', type=int, default=1, 
+                        help='1 for gray image, currently only support 1')
+    parser.add_argument("--cs_ratio", type=int, nargs='+', default=[4, 4], help="compression ratio")
+    parser.add_argument('--num_stage', type=int, default=10, help='satge number of the DUN')
+    parser.add_argument('--scaler', action='store_true', help='whether add scaler to mask')
+    parser.add_argument('--lm', action='store_true', help='whether learnable mask')
+    parser.add_argument('--use_checkpoint', action='store_true', 
+                        help='whether use torch checkpoint to save memory')
+
+    parser.add_argument('--save_interval', type=int, default=5, 
+                        help='save model on test set every x epochs')
+    parser.add_argument("--test_interval", type=int, default=1, 
+                        help='evaluate model on test set every x epochs')
+    parser.add_argument("--data_path", type=str, 
+                        default="/data2/wangzhibin/DOTA/trainsplit512_nogap/images/", 
+                        help='path to dota dataset')
+    parser.add_argument('--save_dir', type=str, default='./model_ckpt', help='output dir')
+    parser.add_argument('--finetune', type=str, default=None, help='resume path')
+    parser.add_argument('--resume', type=str, default=None, help='resume path')
+
+    parser.add_argument('--opt-level', type=str, default='O0', help='use fp32 or fp16')
+    parser.add_argument("--local_rank", default=0, type=int)
+    parser.add_argument("--seed", default=42, type=int)
+    args = parser.parse_args()
+
+    start_epoch = args.start_epoch
+    end_epoch = args.end_epoch
+    batch_size = args.batch_size
+    best_psnr = 0.
+
+    args.local_rank = int(os.getenv('LOCAL_RANK', -1))  
+    # https://pytorch.org/docs/stable/elastic/run.html
+    args.world_size = int(os.getenv('WORLD_SIZE', 1))
+
+    if args.local_rank != -1:
+        torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+
+    # scale learning_rate according to total_batch_size
+    total_batch_size = args.world_size * args.batch_size
+    args.learning_rate = args.learning_rate * float(total_batch_size)
+    args.init_learning_rate = args.learning_rate / 5.
+    args.min_learning_rate = args.learning_rate / 100.
+
+    cr1, cr2 = args.cs_ratio
+
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
+    mask = torch.bernoulli(torch.empty(cr1 * cr2, 1, args.image_size[0] // cr1, args.image_size[1] // cr2).uniform_(0, 1), generator=g)
+    if args.resize_size:
+        mask = torch.bernoulli(torch.empty(cr1 * cr2, 1, args.resize_size[0] // cr1, args.resize_size[1] // cr2).uniform_(0, 1), generator=g)
+
+    main(args)

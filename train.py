@@ -95,13 +95,13 @@ def main(args):
         print('number of params (M): %.2f' % (tot_grad_params / 1.e6))
 
     # lr scheduler
-    scheduler = CosineLRScheduler(
-        optimizer=optimizer,
-        t_initial=args.end_epoch,
-        lr_min=args.min_learning_rate,
-        warmup_t=args.warmup_steps,
-        warmup_lr_init=args.init_learning_rate
-    )
+    # scheduler = CosineLRScheduler(
+    #     optimizer=optimizer,
+    #     t_initial=args.end_epoch,
+    #     lr_min=args.min_learning_rate,
+    #     warmup_t=args.warmup_steps,
+    #     warmup_lr_init=args.init_learning_rate
+    # )
 
     # model, optimizer = amp.initialize(model, optimizer, opt_level=args.opt_level)
 
@@ -148,7 +148,7 @@ def main(args):
     for epoch_i in range(start_epoch + 1, end_epoch + 1):
         model.train()
         # breakpoint()
-        scheduler.step(epoch_i - 1)
+        # scheduler.step(epoch_i - 1)
         if args.local_rank in [-1, 0]:
             lr = optimizer.param_groups[0]['lr']
             print("current learning rate: %e" % lr)
@@ -361,8 +361,8 @@ if __name__ == "__main__":
     # scale learning_rate according to total_batch_size
     total_batch_size = args.world_size * args.batch_size
     args.learning_rate = args.learning_rate * float(total_batch_size)
-    args.init_learning_rate = args.learning_rate / 5.
-    args.min_learning_rate = args.learning_rate / 100.
+    # args.init_learning_rate = args.learning_rate / 5.
+    # args.min_learning_rate = args.learning_rate / 100.
 
     cr1, cr2 = args.cs_ratio
 

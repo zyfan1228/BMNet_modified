@@ -156,7 +156,7 @@ def main(args):
             time_start = time.time()
         if args.local_rank != -1:
             sampler.set_epoch(epoch_i)
-        for i, data in enumerate(train_dataloader):
+        for idx, data in enumerate(train_dataloader):
             iter += 1
 
             # model.zero_grad()
@@ -210,7 +210,7 @@ def main(args):
                 writer.add_scalar('recon_loss', loss.item(), iter)
                 print("%s [epoch %d][%d/%d] recon_loss: %.4f PSNR_train: %.2f dB" %
                       (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-                       epoch_i, i, len(train_dataloader),
+                       epoch_i, idx, len(train_dataloader),
                        loss.item(), psnr_train.item()))
 
         if args.local_rank in [-1, 0]:
@@ -219,7 +219,7 @@ def main(args):
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
 
-        if args.local_rank in [-1, 0]:
+        if args.local_rank in [-1, 0] and :
             # evaluation
             psnr_avg_meter = AverageMeter()
             model.eval()

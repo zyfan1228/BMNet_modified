@@ -143,6 +143,7 @@ def main(args):
 
     # Training
     iter = 0
+    best_psnr = 0
 
     for epoch_i in range(start_epoch + 1, end_epoch + 1):
         model.train()
@@ -219,7 +220,7 @@ def main(args):
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
 
-        if args.local_rank in [-1, 0] and :
+        if args.local_rank in [-1, 0] and ((idx + 1) % 5 == 0 or idx == 0):
             # evaluation
             psnr_avg_meter = AverageMeter()
             model.eval()
@@ -273,22 +274,24 @@ def main(args):
             writer.add_scalar("avg", psnr_avg_meter.avg.item(), epoch_i)
             print("test psnr: %.4f" % psnr_avg_meter.avg.item())
 
-            if args.local_rank in [-1, 0] and epoch_i % args.save_interval == 0:
-                global best_psnr
-                is_best = psnr_avg_meter.avg > best_psnr
+            is_best = psnr_avg_meter.avg > best_psnr
+            if args.local_rank in [-1, 0] and is_best:
                 best_psnr = max(psnr_avg_meter.avg, best_psnr)
-                save_checkpoint({
-                    'epoch': epoch_i,
-                    'state_dict': model.state_dict(),
-                    'best_psnr': best_psnr,
-                    'optimizer': optimizer.state_dict(),
-                    # 'amp': amp.state_dict(),
-                    'mask': model.module.mask if isinstance(model, DDP) else model.mask
-                }, is_best, filename=os.path.join(save_dir, 'net_%d.pth' % epoch_i))
+                save_checkpoint(
+                    {
+                        'epoch': epoch_i,
+                        'state_dict': model.state_dict(),
+                        'best_psnr': best_psnr,
+                        'optimizer': optimizer.state_dict(),
+                        # 'amp': amp.state_dict(),
+                        'mask': model.module.mask if isinstance(model, DDP) else model.mask
+                    }, 
+                    is_best, 
+                    filename=os.path.join(save_dir, f'model_{epoch_i}.pth')
+                )
                 print('best test psnr till now %.4f' % best_psnr)
-                print('checkpoint with %d iterations has been saved.' % epoch_i)
-                print()
-                print()
+                print('checkpoint with %d iterations has been saved. \n' % epoch_i)
+
             psnr_avg_meter.reset()
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth'):

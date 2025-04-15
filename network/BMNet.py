@@ -1,3 +1,5 @@
+import gc
+
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as cp
@@ -195,8 +197,7 @@ class OneStage(torch.nn.Module):
         self.use_checkpoint = use_checkpoint
 
     def forward(self, v, y, Phi, Phisum, h=None):
-        x = self.linear_proj(v, y, Phi, Phisum)
-        v = x.transpose(1, 2).contiguous()
+        v = self.linear_proj(v, y, Phi, Phisum).transpose(1, 2).contiguous()
 
         x0 = self.embed(v)
         x1 = self.down1(x0)
@@ -216,6 +217,7 @@ class OneStage(torch.nn.Module):
 
         x = v + x
         v = x.transpose(1, 2).contiguous()
+
         return v, h
 
 
@@ -225,10 +227,9 @@ class DUN(torch.nn.Module):
         self.in_chans = in_chans
         self.num_stage = num_stage
 
-        stages = []
+        self.stages = nn.ModuleList()
         for i in range(num_stage):
-            stages.append(OneStage(in_chans, embed_dim, i, use_checkpoint))
-        self.stages = nn.ModuleList(stages)
+            self.stages.append(OneStage(in_chans, embed_dim, i, use_checkpoint))
 
     def forward(self, y, Phi):
         Phisum = torch.sum(Phi * Phi, 1, keepdim=True)
@@ -236,9 +237,11 @@ class DUN(torch.nn.Module):
 
         v = At_operator(y, Phi)
         h = None
+        i = 0
 
-        for stage in self.stages:
+        for _, stage in enumerate(self.stages):
             v, h = stage(v, y, Phi, Phisum, h)
+            i += 1
 
         return v, h
 
@@ -307,9 +310,20 @@ class UNet2D(nn.Module):
 
 
 class BMNet(torch.nn.Module):
-    def __init__(self, in_chans=1, num_stage=10, embed_dim=32, cs_ratio=(4, 4), scaler=False, use_checkpoint=False):
+    def __init__(
+            self, 
+            in_chans=1, 
+            num_stage=10, 
+            embed_dim=32, 
+            cs_ratio=(4, 4), 
+            scaler=False, 
+            use_checkpoint=False
+        ):
         super(BMNet, self).__init__()
-        self.dun = DUN(in_chans=in_chans, embed_dim=embed_dim, num_stage=num_stage, use_checkpoint=use_checkpoint)
+        self.dun = DUN(in_chans=in_chans, 
+                       embed_dim=embed_dim, 
+                       num_stage=num_stage, 
+                       use_checkpoint=use_checkpoint)
         self.refinement = UNet2D(in_chans=in_chans)
         self.cr = cs_ratio
         self.scaler = nn.Parameter(torch.Tensor([1.0]), requires_grad=scaler)

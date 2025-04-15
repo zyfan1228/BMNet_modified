@@ -1,10 +1,13 @@
 import os
 import random
-import cv2
+
+# import cv2
 import torch
 import torch.utils.data as data
 from torchvision import transforms
+from PIL import Image
 from pathlib import Path
+
 
 IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG', '.tif',
@@ -14,7 +17,6 @@ IMG_EXTENSIONS = [
 
 def is_image_file(filename):
     return any(filename.endswith(extension) for extension in IMG_EXTENSIONS)
-
 
 def make_dataset(train_dir, test_dir, cr, ycrcb=False, name=False, seed=42):
     train_images = []
@@ -39,32 +41,35 @@ def make_dataset(train_dir, test_dir, cr, ycrcb=False, name=False, seed=42):
 
 
 class DATADataset(data.Dataset):
-    def __init__(self, imgs, cr, ycrcb=False, name=False):
-        self.imgs = imgs
+    def __init__(self, imgs_path, cr, ycrcb=False, name=False):
+        self.imgs_path = imgs_path
         self.cr = cr
         torch.manual_seed(42)
         self.tfs = transforms.Compose([
             transforms.ToTensor(),
-            ])
+        ])
 
         self.ycrcb = ycrcb
         self.name = name
 
     def __getitem__(self, index):
-        path = self.imgs[index]
+        path = self.imgs_path[index]
         name = Path(path).stem
 
-        img = cv2.imread(path)
-        img_ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
-        img_ycrcb = self.tfs(img_ycrcb.copy())
-        img_y = img_ycrcb[0, :, :][None, :, :]
+        img = Image.open(path)
+        img = self.tfs(img)
+        # img_ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+        # img_ycrcb = self.tfs(img_ycrcb)
+        # img_y = img_ycrcb[0, :, :][None, :, :]
 
-        if self.ycrcb:
-            img_y = [img_y, img_ycrcb]
-        if self.name:
-            return img_y, name
-        else:
-            return img_y
+        # if self.ycrcb:
+        #     img_y = [img_y, img_ycrcb]
+        # if self.name:
+        #     return img_y, name
+        # else:
+        #     return img_y
+
+        return img
 
     def __len__(self):
-        return len(self.imgs)
+        return len(self.imgs_path)

@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 import torch
 import numpy as np
 import einops
-from apex import amp
+# from apex import amp
 from PIL import Image
 from tqdm import tqdm
 import tensorboardX
@@ -48,9 +48,10 @@ def main(args):
                                       batch_size=args.batch_size, 
                                       shuffle=True, 
                                       pin_memory=True,
-                                      num_workers=8)
+                                      num_workers=8,
+                                      persistent_workers=True)
     test_dataloader = DataLoader(test_dataset, 
-                                 batch_size=args.batch_size, 
+                                 batch_size=1, 
                                  shuffle=False, 
                                  num_workers=2,
                                  pin_memory=True)
@@ -85,7 +86,9 @@ def main(args):
             print("=> no model weights found at '{}'".format(checkpoint_filename))
 
     # loss and optimizer
-    criterion = nn.MSELoss().cuda()
+    # criterion = nn.MSELoss().cuda()
+    criterion = nn.L1Loss().cuda()
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     if args.local_rank in [-1, 0]:
         tot_grad_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -100,7 +103,7 @@ def main(args):
         warmup_lr_init=args.init_learning_rate
     )
 
-    model, optimizer = amp.initialize(model, optimizer, opt_level=args.opt_level)
+    # model, optimizer = amp.initialize(model, optimizer, opt_level=args.opt_level)
 
     if args.local_rank != -1:
         model = DDP(model, delay_allreduce=True)
@@ -131,7 +134,7 @@ def main(args):
                 best_psnr = checkpoint['best_psnr']
                 model.load_state_dict(checkpoint['state_dict'], strict=False)
                 optimizer.load_state_dict(checkpoint['optimizer'])
-                amp.load_state_dict(checkpoint['amp'])
+                # amp.load_state_dict(checkpoint['amp'])
                 print("=> loaded checkpoint '{}' (epoch {})".format(checkpoint_filename, checkpoint['epoch']))
             else:
                 print("=> no checkpoint found at '{}'".format(checkpoint_filename))
@@ -142,27 +145,28 @@ def main(args):
     iter = 0
 
     for epoch_i in range(start_epoch + 1, end_epoch + 1):
+        model.train()
+        # breakpoint()
         scheduler.step(epoch_i - 1)
         if args.local_rank in [-1, 0]:
             lr = optimizer.param_groups[0]['lr']
             print("current learning rate: %e" % lr)
             writer.add_scalar('lr', lr, epoch_i)
+            torch.cuda.synchronize()
             time_start = time.time()
         if args.local_rank != -1:
             sampler.set_epoch(epoch_i)
         for i, data in enumerate(train_dataloader):
-            # break
             iter += 1
 
-            model.train()
-            model.zero_grad()
+            # model.zero_grad()
             optimizer.zero_grad()
 
             bs = data.shape[0]
 
-            img_train = data.type(torch.FloatTensor).cuda()
+            img_train = data.cuda()
 
-            if args.resize_size:
+            if args.resize_size > 0:
                 t = transforms.Resize(args.resize_size)
                 input_img = t(img_train)
             else:
@@ -182,15 +186,16 @@ def main(args):
 
             out_train = model(meas, input_mask)
 
-            if args.resize_size:
+            if args.resize_size > 0:
                 t = transforms.Resize(args.image_size)
                 out_train = t(out_train)
 
             loss = criterion(out_train, img_train)
 
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
+            # with amp.scale_loss(loss, optimizer) as scaled_loss:
+            #     scaled_loss.backward()
 
+            loss.backward()
             optimizer.step()
 
             # results
@@ -207,9 +212,9 @@ def main(args):
                       (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
                        epoch_i, i, len(train_dataloader),
                        loss.item(), psnr_train.item()))
-                # print(model.module.mask[0][0][0][:5])
-            # break
+
         if args.local_rank in [-1, 0]:
+            torch.cuda.synchronize()
             time_end = time.time()
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
@@ -220,7 +225,7 @@ def main(args):
             model.eval()
             show_test = 5
             print('#################Testing##################')
-            for data in tqdm(test_dataloader):
+            for _, data in tqdm(enumerate(test_dataloader)):
                 bs = data.shape[0]
                 img_test = data.type(torch.FloatTensor).cuda()
 
@@ -263,6 +268,7 @@ def main(args):
 
                 psnr_test = batch_PSNR(out_test, img_test, 1.)
                 psnr_avg_meter.update(psnr_test)
+                breakpoint()
 
             writer.add_scalar("avg", psnr_avg_meter.avg.item(), epoch_i)
             print("test psnr: %.4f" % psnr_avg_meter.avg.item())
@@ -276,7 +282,7 @@ def main(args):
                     'state_dict': model.state_dict(),
                     'best_psnr': best_psnr,
                     'optimizer': optimizer.state_dict(),
-                    'amp': amp.state_dict(),
+                    # 'amp': amp.state_dict(),
                     'mask': model.module.mask if isinstance(model, DDP) else model.mask
                 }, is_best, filename=os.path.join(save_dir, 'net_%d.pth' % epoch_i))
                 print('best test psnr till now %.4f' % best_psnr)
@@ -285,12 +291,10 @@ def main(args):
                 print()
             psnr_avg_meter.reset()
 
-
 def save_checkpoint(state, is_best, filename='checkpoint.pth'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, os.path.join(save_dir, 'model_best.pth'))
-
 
 def reduce_tensor(tensor):
     rt = tensor.clone()
@@ -311,7 +315,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=5e-6, help='learning rate')
     parser.add_argument('--batch_size', type=int, default=1, help='batch size')
     parser.add_argument('--image_size', type=int, nargs='+', default=[512, 512], help='image size')
-    parser.add_argument('--resize_size', type=int, nargs='+', default=None, 
+    parser.add_argument('--resize_size', type=int, nargs='+', default=-1, 
                         help='resize the image to fit the compression ratio')
     parser.add_argument('--n_channels', type=int, default=1, 
                         help='1 for gray image, currently only support 1')
@@ -362,8 +366,30 @@ if __name__ == "__main__":
     g = torch.Generator()
     g.manual_seed(args.seed)
 
-    mask = torch.bernoulli(torch.empty(cr1 * cr2, 1, args.image_size[0] // cr1, args.image_size[1] // cr2).uniform_(0, 1), generator=g)
-    if args.resize_size:
-        mask = torch.bernoulli(torch.empty(cr1 * cr2, 1, args.resize_size[0] // cr1, args.resize_size[1] // cr2).uniform_(0, 1), generator=g)
+    # mask = torch.bernoulli(torch.empty(
+    #     cr1 * cr2, 
+    #     1, 
+    #     args.image_size[0] // cr1, 
+    #     args.image_size[1] // cr2
+    #     ).uniform_(0, 1), generator=g
+    # )
+
+    # 随机初始化0-1连续值掩码
+    mask = torch.rand(
+        cr1 * cr2, 
+        1, 
+        args.image_size[0] // cr1, 
+        args.image_size[1] // cr2,
+        generator=g
+    )
+
+    if args.resize_size > 0:
+        mask = torch.bernoulli(torch.empty(
+            cr1 * cr2, 
+            1, 
+            args.resize_size[0] // cr1, 
+            args.resize_size[1] // cr2
+            ).uniform_(0, 1), generator=g
+        )
 
     main(args)

@@ -18,7 +18,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from timm.scheduler import CosineLRScheduler
+# from timm.scheduler import CosineLRScheduler
 
 from data.dotadataset import make_dataset
 from utils import batch_PSNR, time2file_name, AverageMeter
@@ -26,6 +26,16 @@ from network.BMNet import BMNet
 
 
 def main(args):
+    global save_dir
+    # load model and make model saving/log dir
+    date_time = str(datetime.datetime.now())
+    date_time = time2file_name(date_time)
+    save_dir = os.path.join(args.save_dir, date_time)
+    if not os.path.exists(save_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(save_dir)
+    # tensorboardX
+    writer = tensorboardX.SummaryWriter(log_dir=save_dir)
+
     train_dir = args.data_path
     test_dir = train_dir.replace('train', 'valid')
     train_dataset, test_dataset = make_dataset(train_dir, 
@@ -69,6 +79,8 @@ def main(args):
 
     # args.lm: learnable mask or not
     model.mask = nn.Parameter(mask.cuda(), requires_grad=args.lm)
+    print(f"Learnable mask is {model.mask.requires_grad}")
+    save_mask(model.mask.detach().cpu(), os.path.join(save_dir, "mask_origin.npy"))
 
     if args.finetune is not None:
         checkpoint_filename = args.finetune
@@ -110,17 +122,6 @@ def main(args):
     if args.local_rank != -1:
         model = DDP(model, delay_allreduce=True)
 
-    global save_dir
-    # load model and make model saving/log dir
-    date_time = str(datetime.datetime.now())
-    date_time = time2file_name(date_time)
-    save_dir = args.save_dir + '/' + date_time
-
-    if not os.path.exists(save_dir) and args.local_rank in [-1, 0]:
-        os.makedirs(save_dir)
-        # tensorboardX
-        writer = tensorboardX.SummaryWriter(log_dir=save_dir)
-
     if args.resume is not None:
         # Use a local scope to avoid dangling referencesa
         def resume():
@@ -148,6 +149,7 @@ def main(args):
     best_psnr = 0
 
     for epoch_i in range(start_epoch + 1, end_epoch + 1):
+        epoch_avg_loss = 0
         model.train()
         # breakpoint()
         # scheduler.step(epoch_i - 1)
@@ -203,6 +205,8 @@ def main(args):
             optimizer.step()
 
             # results
+            epoch_avg_loss += loss.detach().cpu()
+            epoch_avg_loss = epoch_avg_loss / (idx + 1)
             out_train = torch.clamp(out_train, 0., 1.)
             psnr_train = batch_PSNR(out_train, img_train, 1.)
             psnr_train = torch.as_tensor(float(psnr_train)).cuda()
@@ -212,10 +216,15 @@ def main(args):
             if args.local_rank in [-1, 0]:
                 writer.add_scalar('psnr', psnr_train.item(), iter)
                 writer.add_scalar('recon_loss', loss.item(), iter)
-                print("%s [epoch %d][%d/%d] recon_loss: %.4f PSNR_train: %.2f dB" %
+                # print(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} \
+                # [epoch {epoch_i}][{idx}/{len_train_dataloader}] \
+                # recon_loss: {loss.item():.4f} \
+                # PSNR_train: {psnr_train.item():.2f} dB")
+
+                print("%s [epoch %d][%d/%d] recon_loss: %.4f avg_loss: %.4f PSNR_train: %.2f dB" %
                       (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
                        epoch_i, idx, len(train_dataloader),
-                       loss.item(), psnr_train.item()))
+                       loss.item(), epoch_avg_loss.item(), psnr_train.item()))
 
         if args.local_rank in [-1, 0]:
             torch.cuda.synchronize()
@@ -290,18 +299,21 @@ def main(args):
                         'mask': model.module.mask if isinstance(model, DDP) else model.mask
                     }, 
                     is_best, 
-                    psnr_best=best_psnr,
-                    filename=os.path.join(save_dir, f'model_{epoch_i}.pth')
+                    filename=os.path.join(save_dir, f'model_{epoch_i}_psnr{best_psnr:.4f}.pth')
                 )
                 print('best test psnr till now %.4f' % best_psnr)
                 print('checkpoint with %d iterations has been saved. \n' % epoch_i)
 
+                mask_save_path = os.path.join(save_dir, f"mask_{epoch_i}.npy")
+                save_mask(model.mask.detach().cpu(), mask_save_path)
+                print(f'learnable mask (shape {model.mask.shape}) has been saved. \n')
+
             psnr_avg_meter.reset()
 
-def save_checkpoint(state, is_best, psnr_best, filename='checkpoint.pth'):
+def save_checkpoint(state, is_best, filename='checkpoint.pth'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, os.path.join(save_dir, f'model_best_psnr{psnr_best:.4f}.pth'))
+        shutil.copyfile(filename, os.path.join(save_dir, f'model_best.pth'))
 
 def reduce_tensor(tensor):
     rt = tensor.clone()
@@ -309,6 +321,10 @@ def reduce_tensor(tensor):
     rt /= args.world_size
 
     return rt
+
+def save_mask(mask_tensor, save_path):
+    mask_array = mask_tensor.numpy()
+    np.save(save_path, mask_array)
 
 
 if __name__ == "__main__":
@@ -382,7 +398,7 @@ if __name__ == "__main__":
     #     ).uniform_(0, 1), generator=g
     # )
 
-    # 随机初始化0-1连续值掩码
+    # 根据seed随机初始化0-1连续值掩码
     mask = torch.rand(
         cr1 * cr2, 
         1, 

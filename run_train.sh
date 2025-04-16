@@ -1,1 +1,4 @@
-CUDA_VISIBLE_DEVICES=3 python train.py --batch_size 4 --learning_rate 5e-6 --image_size 512 512 --num_stage 5 --cs_ratio 4 4 --warmup_steps 5 --end_epoch 100 --data_path /data3/fanzhuoyao/MY_WORKS/MyGithub/BMNet_modified/dataset/simulated_data_v1/train/gt/ --save_dir ./model_ckpt/ --local_rank -1
+CUDA_VISIBLE_DEVICES=3 python train.py --batch_size 4 --learning_rate 2e-5 --image_size 512 512 --num_stage 10 --cs_ratio 4 4 --warmup_steps 5 --end_epoch 100 --data_path /data2/fanzhuoyao/MyProjects/BMNet_modified/dataset/train/ --save_dir ./model_ckpt/ --local_rank -1
+
+# -- learnable mask ---
+# CUDA_VISIBLE_DEVICES=3 python train.py --batch_size 4 --learning_rate 2e-5 --image_size 512 512 --num_stage 10 --cs_ratio 4 4 --warmup_steps 5 --end_epoch 100 --data_path /data2/fanzhuoyao/MyProjects/BMNet_modified/dataset/train/gt --save_dir ./model_ckpt/ --local_rank -1 --lm

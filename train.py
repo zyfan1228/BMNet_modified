@@ -27,7 +27,7 @@ from network.BMNet import BMNet
 
 def main(args):
     train_dir = args.data_path
-    test_dir = train_dir.replace('train', 'val')
+    test_dir = train_dir.replace('train', 'valid')
     train_dataset, test_dataset = make_dataset(train_dir, 
                                                test_dir, 
                                                cr=max(args.cs_ratio), 
@@ -42,16 +42,17 @@ def main(args):
                                       batch_size=args.batch_size, 
                                       sampler=sampler, 
                                       pin_memory=True, 
-                                      num_workers=8)
+                                      num_workers=6)
     else:
         train_dataloader = DataLoader(train_dataset, 
                                       batch_size=args.batch_size, 
                                       shuffle=True, 
+                                      drop_last=True,
                                       pin_memory=True,
-                                      num_workers=8,
+                                      num_workers=6,
                                       persistent_workers=True)
     test_dataloader = DataLoader(test_dataset, 
-                                 batch_size=1, 
+                                 batch_size=3, 
                                  shuffle=False, 
                                  num_workers=2,
                                  pin_memory=True)
@@ -66,7 +67,7 @@ def main(args):
         use_checkpoint=args.use_checkpoint
     ).cuda()
 
-    # whether learnable mask
+    # args.lm: learnable mask or not
     model.mask = nn.Parameter(mask.cuda(), requires_grad=args.lm)
 
     if args.finetune is not None:
@@ -90,6 +91,7 @@ def main(args):
     criterion = nn.L1Loss().cuda()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
     if args.local_rank in [-1, 0]:
         tot_grad_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print('number of params (M): %.2f' % (tot_grad_params / 1.e6))
@@ -157,7 +159,7 @@ def main(args):
             time_start = time.time()
         if args.local_rank != -1:
             sampler.set_epoch(epoch_i)
-        for idx, data in enumerate(train_dataloader):
+        for idx, (data, gt) in enumerate(train_dataloader):
             iter += 1
 
             # model.zero_grad()
@@ -166,6 +168,7 @@ def main(args):
             bs = data.shape[0]
 
             img_train = data.cuda()
+            gt = gt.cuda()
 
             if args.resize_size > 0:
                 t = transforms.Resize(args.resize_size)
@@ -191,7 +194,7 @@ def main(args):
                 t = transforms.Resize(args.image_size)
                 out_train = t(out_train)
 
-            loss = criterion(out_train, img_train)
+            loss = criterion(out_train, gt)
 
             # with amp.scale_loss(loss, optimizer) as scaled_loss:
             #     scaled_loss.backward()
@@ -220,17 +223,18 @@ def main(args):
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
 
-        if args.local_rank in [-1, 0] and ((idx + 1) % 5 == 0 or idx == 0):
+        if args.local_rank in [-1, 0] and (idx + 1) % 2 == 0:
             # evaluation
             psnr_avg_meter = AverageMeter()
             model.eval()
-            show_test = 5
+            show_test = 0
             print('#################Testing##################')
-            for _, data in tqdm(enumerate(test_dataloader)):
+            for _, (data, gt) in enumerate(tqdm(test_dataloader, ncols=150, colour='blue')):
                 bs = data.shape[0]
-                img_test = data.type(torch.FloatTensor).cuda()
+                img_test = data.cuda()
+                gt = gt.cuda()
 
-                if args.resize_size:
+                if args.resize_size > 0:
                     t = transforms.Resize(args.resize_size)
                     input_img = t(img_test)
                 else:
@@ -267,9 +271,8 @@ def main(args):
                     writer.add_image(f'reconstruction_{show_test}', test, epoch_i)
                     show_test = show_test - 1
 
-                psnr_test = batch_PSNR(out_test, img_test, 1.)
+                psnr_test = batch_PSNR(out_test, gt, 1.)
                 psnr_avg_meter.update(psnr_test)
-                breakpoint()
 
             writer.add_scalar("avg", psnr_avg_meter.avg.item(), epoch_i)
             print("test psnr: %.4f" % psnr_avg_meter.avg.item())
@@ -287,6 +290,7 @@ def main(args):
                         'mask': model.module.mask if isinstance(model, DDP) else model.mask
                     }, 
                     is_best, 
+                    psnr_best=best_psnr,
                     filename=os.path.join(save_dir, f'model_{epoch_i}.pth')
                 )
                 print('best test psnr till now %.4f' % best_psnr)
@@ -294,15 +298,16 @@ def main(args):
 
             psnr_avg_meter.reset()
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth'):
+def save_checkpoint(state, is_best, psnr_best, filename='checkpoint.pth'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, os.path.join(save_dir, 'model_best.pth'))
+        shutil.copyfile(filename, os.path.join(save_dir, f'model_best_psnr{psnr_best:.4f}.pth'))
 
 def reduce_tensor(tensor):
     rt = tensor.clone()
     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
     rt /= args.world_size
+
     return rt
 
 
@@ -359,8 +364,8 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
     # scale learning_rate according to total_batch_size
-    total_batch_size = args.world_size * args.batch_size
-    args.learning_rate = args.learning_rate * float(total_batch_size)
+    # total_batch_size = args.world_size * args.batch_size
+    # args.learning_rate = args.learning_rate * float(total_batch_size)
     # args.init_learning_rate = args.learning_rate / 5.
     # args.min_learning_rate = args.learning_rate / 100.
 

@@ -18,40 +18,46 @@ IMG_EXTENSIONS = [
 def is_image_file(filename):
     return any(filename.endswith(extension) for extension in IMG_EXTENSIONS)
 
-def make_dataset(train_dir, test_dir, cr, ycrcb=False, name=False, seed=42):
+def make_dataset(train_dir, test_dir, cr, ycrcb=False, name=False, defocus=True):
 
-    train_dataset = DATADataset(train_dir, cr=cr, ycrcb=ycrcb, name=name)
-    test_dataset = DATADataset(test_dir, cr=cr, ycrcb=ycrcb, name=name)
+    train_dataset = DATADataset(train_dir, cr=cr, ycrcb=ycrcb, name=name, defocus=defocus)
+    test_dataset = DATADataset(test_dir, cr=cr, ycrcb=ycrcb, name=name, defocus=defocus)
+
+    print(f"Do defocus SCI is -{defocus}-")
 
     return train_dataset, test_dataset
 
 
 class DATADataset(data.Dataset):
     def __init__(self, imgs_path, cr, ycrcb=False, name=False, defocus=True):
-        self.img_path = os.path.join(imgs_path, 'defocus')
-        self.gt_path = os.path.join(imgs_path, 'gt')
-        self.img_list = sorted(os.listdir(self.img_path))
-        self.gt_list = sorted(os.listdir(self.gt_path))
+        self.ycrcb = ycrcb
+        self.name = name
+        self.defocus = defocus
 
-        self.cr = cr
+        if self.defocus:
+            # if do defocus sci task
+            self.img_path = os.path.join(imgs_path, 'defocus')
+            self.gt_path = os.path.join(imgs_path, 'gt')
+            self.gt_list = sorted(os.listdir(self.gt_path))
+        else:
+            self.img_path = os.path.join(imgs_path, 'gt')
+
+        self.img_list = sorted(os.listdir(self.img_path))
+        
+        # self.cr = cr
         torch.manual_seed(42)
         self.tfs = transforms.Compose([
             transforms.ToTensor(),
         ])
 
-        self.ycrcb = ycrcb
-        self.name = name
-        self.defocus = defocus
-
     def __getitem__(self, index):
         img_path = os.path.join(self.img_path, self.img_list[index])
-        if self.defocus:
-            gt_path = os.path.join(self.gt_path, self.gt_list[index])
         # name = Path(path).stem
-
         img = Image.open(img_path)
         img = self.tfs(img)
+
         if self.defocus:
+            gt_path = os.path.join(self.gt_path, self.gt_list[index])
             gt = Image.open(gt_path)
             gt = self.tfs(gt)
         else:

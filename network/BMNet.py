@@ -174,7 +174,9 @@ class OneStage(torch.nn.Module):
 
         self.cross_attn = TransformerBlock(
             dim=embed_dim*2*2,
-            num_heads=4, ffn_expansion_factor=2, bias=True,
+            num_heads=4, 
+            ffn_expansion_factor=2, 
+            bias=True,
         ) if index != 0 else None
 
         self.upc2 = nn.Sequential(

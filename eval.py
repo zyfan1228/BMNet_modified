@@ -1,61 +1,27 @@
 import os
 import time
+import datetime
 
 import cv2
+import einops
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
-import datetime
-from argparse import ArgumentParser
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from PIL import Image
+from argparse import ArgumentParser
 
 from utils import PSNR, SSIM, time2file_name, AverageMeter
-from data.dotadataset import make_dataset
+from data.dotadataset import DATADataset
 from network.BMNet import BMNet
 
-import einops
-
-parser = ArgumentParser(description='BMI')
-
-parser.add_argument('--gpu', type=str, default='3', help='gpu index')
-parser.add_argument('--data_path', type=str, default="./samples", help='path to test set')
-# parser.add_argument('--model_path', type=str, default="/data2/wangzhibin/trainning_ckpt/BMNet/cr-16/model_best.pth", help='trained or pre-trained model directory')
-parser.add_argument('--model_path', type=str, default="/data2/wangzhibin/_trainning_ckpt/_RSSCI_v2.0/baseline-16/model_best.pth", help='trained or pre-trained model directory')
-parser.add_argument('--results_path', type=str, default='./results', help='results for reconstructed images')
-
-parser.add_argument('--image_size', type=int, nargs='+', default=[512, 512], help='image size')
-parser.add_argument('--resize_size', type=int, nargs='+', default=None, help='image size')
-parser.add_argument("--cs_ratio", type=int, nargs='+', default=[4, 4], help="compression ratio")
-
-parser.add_argument("--num_show", type=int, default=1, help="number of images to show")
-
-parser.add_argument('--seed', type=int, default=42, help='random seed')
-
-args = parser.parse_args()
 
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+def eval(args):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
 
-torch.manual_seed(args.seed)
-torch.cuda.manual_seed(args.seed)
-
-# load model and make model saving/log dir
-date_time = str(datetime.datetime.now())
-date_time = time2file_name(date_time)
-results_dir = args.results_path + '/' + date_time
-
-if not os.path.exists(results_dir):
-    os.makedirs(results_dir)
-
-cr1, cr2 = args.cs_ratio
-
-
-def eval():
     time_avg_meter = AverageMeter()
     psnr_avg_meter = AverageMeter()
     ssim_avg_meter = AverageMeter()
@@ -72,16 +38,21 @@ def eval():
     model.to(device)
     model.eval()
 
-    _, test_dataset = make_dataset(args.data_path, args.data_path, cr=max(args.cs_ratio), ycrcb=True, name=True, seed=args.seed)
-    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=8)
+    test_dataset = DATADataset(args.data_path, cr=max(args.cs_ratio))
+    
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=1, 
+                                 shuffle=False, 
+                                 num_workers=2,
+                                 pin_memory=True)
 
     iter = 0
     print('#################Testing##################')
-    for [img_y, img_ycrcb], name in tqdm(test_dataloader):
-        bs = img_y.shape[0]
-        img_test = img_y.type(torch.FloatTensor).to(device)
+    for idx, (data, gt) in enumerate(tqdm(test_dataloader)):
+        bs = data.shape[0]
+        img_test = data.to(device)
 
-        if args.resize_size:
+        if args.resize_size > 0:
             t = transforms.Resize(args.resize_size)
             input_img = t(img_test)
         else:
@@ -101,7 +72,7 @@ def eval():
             ed = time.time()
             time_avg_meter.update(ed - st)
 
-            if args.resize_size:
+            if args.resize_size > 0:
                 t = transforms.Resize(args.image_size)
                 out_test = t(out_test)
 
@@ -134,4 +105,47 @@ def eval():
 
 
 if __name__ == "__main__":
-    eval()
+    parser = ArgumentParser(description='BMI')
+
+    parser.add_argument('--gpu', type=str, default='3', help='gpu index')
+    parser.add_argument('--data_path', 
+                        type=str, 
+                        default="./samples", 
+                        help='path to test set')
+    parser.add_argument(
+        '--model_path', 
+        type=str, 
+        default="/data2/wangzhibin/_trainning_ckpt/_RSSCI_v2.0/baseline-16/model_best.pth", help='trained or pre-trained model directory'
+    )
+    parser.add_argument('--results_path', 
+                        type=str, 
+                        default='./results', 
+                        help='results for reconstructed images')
+
+    parser.add_argument('--image_size', type=int, nargs='+', default=[512, 512], help='image size')
+    parser.add_argument('--resize_size', type=int, nargs='+', default=None, help='image size')
+    parser.add_argument("--cs_ratio", type=int, nargs='+', default=[4, 4], help="compression ratio")
+
+    parser.add_argument("--num_show", type=int, default=1, help="number of images to show")
+
+    parser.add_argument('--seed', type=int, default=42, help='random seed')
+
+    args = parser.parse_args()
+
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+
+    # load model and make model saving/log dir
+    date_time = str(datetime.datetime.now())
+    date_time = time2file_name(date_time)
+    results_dir = args.results_path + '/' + date_time
+
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+
+    cr1, cr2 = args.cs_ratio
+
+    eval(args)

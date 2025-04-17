@@ -41,7 +41,7 @@ def main(args):
     train_dataset, test_dataset = make_dataset(train_dir, 
                                                test_dir, 
                                                cr=max(args.cs_ratio), 
-                                               seed=args.seed)
+                                               defocus=args.defocus)
 
     if args.local_rank != -1:
         sampler = DistributedSampler(train_dataset, 
@@ -348,6 +348,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_stage', type=int, default=10, help='satge number of the DUN')
     parser.add_argument('--scaler', action='store_true', help='whether add scaler to mask')
     parser.add_argument('--lm', action='store_true', help='whether learnable mask')
+    parser.add_argument('--defocus', action='store_true', help='whether do dedocus sci')
+
     parser.add_argument('--use_checkpoint', action='store_true', 
                         help='whether use torch checkpoint to save memory')
 

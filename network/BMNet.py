@@ -204,12 +204,8 @@ class OneStage(torch.nn.Module):
         x0 = self.embed(v)
         x1 = self.down1(x0)
         if self.use_checkpoint:
-            # x0 = cp.checkpoint(self.embed, v)
-            # x1 = cp.checkpoint(self.down1, x0)
-            x2 = cp.checkpoint(self.down2, x1)   
+            x2 = cp.checkpoint(self.down2, x1)
         else: 
-            # x0 = self.embed(v)
-            # x1 = self.down1(x0)
             x2 = self.down2(x1)
 
         if h is None:
@@ -222,14 +218,12 @@ class OneStage(torch.nn.Module):
 
         x2 = self.upc2(x2)
         x1 = self.upc1(x1 + x2)
-        if self.use_checkpoint:
-            # x2 = cp.checkpoint(self.upc2, x2)
-            # x1 = cp.checkpoint(self.upc1, x1 + x2)
-            x = cp.checkpoint(self.neck, x0 + x1)
-        else:
-            # x2 = self.upc2(x2)
-            # x1 = self.upc1(x1 + x2)
-            x = self.neck(x0 + x1)
+        x = self.neck(x0 + x1)
+        # if self.use_checkpoint:
+        #     # x = cp.checkpoint(self.neck, x0 + x1)
+        #     x = self.neck(x0 + x1)
+        # else:
+        #     x = self.neck(x0 + x1)
 
         x = v + x
         v = x.transpose(1, 2).contiguous()

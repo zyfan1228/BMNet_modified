@@ -304,9 +304,10 @@ def main(args):
                 print('best test psnr till now %.4f' % best_psnr)
                 print('checkpoint with %d iterations has been saved. \n' % epoch_i)
 
-                mask_save_path = os.path.join(save_dir, f"mask_{epoch_i}.npy")
-                save_mask(model.mask.detach().cpu(), mask_save_path)
-                print(f'learnable mask (shape {model.mask.shape}) has been saved. \n')
+                if args.lm:
+                    mask_save_path = os.path.join(save_dir, f"mask_{epoch_i}.npy")
+                    save_mask(model.mask.detach().cpu(), mask_save_path)
+                    print(f'learnable mask (shape {model.mask.shape}) has been saved. \n')
 
             psnr_avg_meter.reset()
 

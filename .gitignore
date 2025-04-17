@@ -1,3 +1,5 @@
 dataset/
 model_ckpt/
 __pycache__/
+
+run_train.sh

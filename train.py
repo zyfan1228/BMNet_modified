@@ -1,8 +1,10 @@
 import os
+from re import M
 import time
 import shutil
 import datetime
 from argparse import ArgumentParser
+from xmlrpc.client import TRANSPORT_ERROR
 
 import torch
 import numpy as np
@@ -17,6 +19,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import MultiStepLR
 # from timm.scheduler import CosineLRScheduler
 
 from data.dotadataset import make_dataset
@@ -115,6 +118,12 @@ def main(args):
     #     warmup_t=args.warmup_steps,
     #     warmup_lr_init=args.init_learning_rate
     # )
+    scheduler = MultiStepLR(
+        optimizer=optimizer,
+        milestones=[125, 150, 175],
+        gamma=0.5,
+        verbose=True
+    )
 
     # model, optimizer = amp.initialize(model, optimizer, opt_level=args.opt_level)
 
@@ -151,7 +160,6 @@ def main(args):
         epoch_avg_loss = 0
         model.train()
         # breakpoint()
-        # scheduler.step(epoch_i - 1)
         if args.local_rank in [-1, 0]:
             lr = optimizer.param_groups[0]['lr']
             print("current learning rate: %e" % lr)
@@ -309,6 +317,8 @@ def main(args):
                     print(f'learnable mask (shape {model.mask.shape}) has been saved. \n')
 
             psnr_avg_meter.reset()
+
+        scheduler.step()
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth'):
     torch.save(state, filename)

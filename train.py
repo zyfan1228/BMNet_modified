@@ -13,7 +13,6 @@ from tqdm import tqdm
 import tensorboardX
 import torch.nn as nn
 import torch.distributed as dist
-import torch.backends.cudnn as cudnn
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -329,10 +328,16 @@ def save_mask(mask_tensor, save_path):
 
 
 if __name__ == "__main__":
-    cudnn.benchmark = True
+    seed_value = 42
+    torch.manual_seed(seed_value)
+    torch.cuda.manual_seed(seed_value)
+    torch.cuda.manual_seed_all(seed_value)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = False
 
     parser = ArgumentParser(description='BMI')
-
     parser.add_argument('--warmup_steps', type=int, default=5, 
                         help='epoch number of learnig rate warmup')
     parser.add_argument('--start_epoch', type=int, default=0, help='epoch number of start training')

@@ -105,8 +105,16 @@ def eval(args):
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description='BMI')
+    seed_value = 42
+    torch.manual_seed(seed_value)
+    torch.cuda.manual_seed(seed_value)
+    torch.cuda.manual_seed_all(seed_value)
 
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = False
+
+    parser = ArgumentParser(description='BMI')
     parser.add_argument('--gpu', type=str, default='3', help='gpu index')
     parser.add_argument('--data_path', 
                         type=str, 

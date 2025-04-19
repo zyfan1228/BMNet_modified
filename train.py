@@ -1,16 +1,16 @@
 import os
-from re import M
+# from re import M
 import time
 import shutil
 import datetime
 from argparse import ArgumentParser
-from xmlrpc.client import TRANSPORT_ERROR
+# from xmlrpc.client import TRANSPORT_ERROR
 
 import torch
 import numpy as np
 import einops
 # from apex import amp
-from PIL import Image
+# from PIL import Image
 from tqdm import tqdm
 import tensorboardX
 import torch.nn as nn
@@ -168,7 +168,12 @@ def main(args):
             time_start = time.time()
         if args.local_rank != -1:
             sampler.set_epoch(epoch_i)
-        for idx, (data, gt) in enumerate(train_dataloader):
+        
+        training_bar = tqdm(train_dataloader, 
+                            desc=f"[Epoch {epoch_i}/{end_epoch}]", 
+                            colour='yellow',
+                            dynamic_ncols=True)
+        for idx, (data, gt) in enumerate(training_bar):
             iter += 1
 
             # model.zero_grad()
@@ -228,10 +233,9 @@ def main(args):
                 # recon_loss: {loss.item():.4f} \
                 # PSNR_train: {psnr_train.item():.2f} dB")
 
-                print("%s [epoch %d][%d/%d] recon_loss: %.4f avg_loss: %.4f PSNR_train: %.2f dB" %
-                      (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-                       epoch_i, idx, len(train_dataloader),
-                       loss.item(), epoch_avg_loss.item(), psnr_train.item()))
+            training_bar.set_postfix({"[Stage]": f"[{idx + 1}/{len(train_dataloader)}]", 
+                                     "Recon_loss": f"{loss.item():.4f}",
+                                     "PSNR_trian": f"{psnr_train.item():.4f}"})
 
         if args.local_rank in [-1, 0]:
             torch.cuda.synchronize()
@@ -244,8 +248,10 @@ def main(args):
             psnr_avg_meter = AverageMeter()
             model.eval()
             show_test = 0
-            print('#################Testing##################')
-            for _, (data, gt) in enumerate(tqdm(test_dataloader, ncols=150, colour='blue')):
+            print('################# Testing ##################')
+            for _, (data, gt) in enumerate(tqdm(test_dataloader, 
+                                                dynamic_ncols=True, 
+                                                colour='blue')):
                 bs = data.shape[0]
                 img_test = data.cuda()
                 gt = gt.cuda()

@@ -343,7 +343,9 @@ class BMNet(torch.nn.Module):
 
         inital, hidden = self.dun(y, Phi)
 
-        inital = rearrange(inital, "b (cr1 cr2) c h w -> b c (cr1 h) (cr2 w)", cr1=cr1, cr2=cr2)
+        inital = rearrange(inital, 
+                           "b (cr1 cr2) c h w -> b c (cr1 h) (cr2 w)", 
+                           cr1=cr1, cr2=cr2)
         final = inital + self.refinement(inital)
 
         if output_hidden:

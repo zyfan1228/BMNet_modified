@@ -319,7 +319,9 @@ def main(args):
 
                 if args.lm:
                     mask_save_path = os.path.join(save_dir, f"mask_{epoch_i}.npy")
+                    best_mask_path = os.path.join(save_dir, "mask_best.npy")
                     save_mask(model.mask.detach().cpu(), mask_save_path)
+                    save_mask(model.mask.detach().cpu(), best_mask_path)
                     print(f'learnable mask (shape {model.mask.shape}) has been saved. \n')
 
             psnr_avg_meter.reset()
@@ -339,8 +341,8 @@ def reduce_tensor(tensor):
     return rt
 
 def save_mask(mask_tensor, save_path):
-    mask_array = mask_tensor.numpy()
-    np.save(save_path, mask_array)
+    # mask_array = mask_tensor.numpy()
+    np.save(save_path, mask_tensor.numpy())
 
 
 if __name__ == "__main__":

@@ -248,7 +248,7 @@ def main(args):
             psnr_avg_meter = AverageMeter()
             model.eval()
             show_test = 0
-            print('################# Testing ##################')
+            print('################# Validing ##################')
             for _, (data, gt) in enumerate(tqdm(test_dataloader, 
                                                 dynamic_ncols=True, 
                                                 colour='blue')):

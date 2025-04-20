@@ -58,6 +58,7 @@ def eval(args, results_dir):
                                  pin_memory=True)
 
     print('################# Testing ##################')
+    save_idxs = [350, 355, 360, 365, 370, 375, 380]
     for idx, (data, gt) in enumerate(tqdm(test_dataloader, ncols=125, colour='green')):
         # break
         bs = data.shape[0]
@@ -97,21 +98,10 @@ def eval(args, results_dir):
         ssim_test = SSIM(out_test, gt, 1.)
         ssim_avg_meter.update(ssim_test)
 
-        # if show_test:
-        #     img_ycrcb = (img_ycrcb[0].cpu().data.numpy() * 255.).astype(np.uint8).transpose(1, 2, 0)
-
-        #     show1 = cv2.cvtColor(img_ycrcb, cv2.COLOR_YCrCb2BGR)
-
-        #     show2 = out_test[0, :]
-        #     y = (show2.squeeze(0).cpu().data.numpy() * 255.).astype(np.uint8)
-        #     show2 = img_ycrcb.copy()
-        #     show2[:, :, 0] = y
-        #     show2 = cv2.cvtColor(show2, cv2.COLOR_YCrCb2BGR)
-
-        #     cv2.imwrite(results_dir + f'/orig_{name}.jpg', show1)
-        #     cv2.imwrite(results_dir + f'/recon_{name}.jpg', show2)
-
-        #     show_test = show_test - 1
+        if idx in save_idxs:
+            save_array(out_test.cpu(), file_path=os.path.join(results_dir, f"output_idx_{idx}.png"))
+            save_array(gt.cpu(), file_path=os.path.join(results_dir, f"gt_idx_{idx}.png"))
+            save_array(data.cpu(), file_path=os.path.join(results_dir, f"input_idx_{idx}.png"))
 
     print("test psnr: %.4f" % psnr_avg_meter.avg)
     print("test ssim: %.4f" % ssim_avg_meter.avg)
@@ -130,25 +120,33 @@ def eval(args, results_dir):
             "(cr1 cr2) c h w -> c (cr1 h) (cr2 w)", 
             cr1=cr1, cr2=cr2
         )
-        compare_mask(mask_origin, mask_best)
+        compare_mask(mask_origin, mask_best, results_dir)
     
 
-def compare_mask(mask_origin, mask_best):
+def compare_mask(mask_origin, mask_best, results_dir):
     transm_origin = mask_origin.sum() / mask_origin.size
     transm_best = mask_best.sum() / mask_best.size
 
     mask_diff = mask_best - mask_origin
-    # save_heatmap_with_signs(np.where(mask_diff[0] > 0, mask_diff[0], 0))
-    save_heatmap_with_signs(mask_diff[0])
+    save_heatmap_with_signs(mask_diff[0], results_dir)
+    # save_heatmap_with_signs(mask_origin[0], file_name="mask_origin_heatmap.png")
 
     print(f"Transmittance: [origin]: {transm_origin:.6f}, [best]: {transm_best:.6f}")
 
-def save_heatmap_with_signs(array):
+def save_array(data, file_path):
+    if isinstance(data, torch.Tensor):
+        data_array = data.numpy()
+    else:
+        data_array = data
+    data_array = data_array.squeeze()
+    Image.fromarray((data_array * 255).astype(np.uint8)).save(file_path)
+
+def save_heatmap_with_signs(array, results_dir, file_name="mask_diff_heatmap.png"):
     """
     生成并保存带正负值区分的热力图
     :param array: 输入的ndarray，值范围[-1, 1]
     """
-    save_path=os.path.join(args.results_path, "mask_diff_heatmap.png")
+    save_path=os.path.join(results_dir, file_name)
 
     # 创建自定义颜色映射（红-白-绿）
     colors = [
@@ -167,7 +165,7 @@ def save_heatmap_with_signs(array):
     min_value = array.min()
     max_value = array.max()
     array = 2 * (array - min_value) / (max_value - min_value) - 1
-    # array = np.where(array < 0, array, 0)
+    # array = np.where(array > 0, array, 0)
     
     # 绘制热力图
     ax = sns.heatmap(

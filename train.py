@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 
 from data.dotadataset import make_dataset
 from utils import batch_PSNR, time2file_name, AverageMeter
-from network.BMNet import BMNet
+from model import BMNet
 
 
 def main(args):
@@ -172,7 +172,7 @@ def main(args):
         training_bar = tqdm(train_dataloader, 
                             desc=f"[Epoch {epoch_i}/{end_epoch}]", 
                             colour='yellow',
-                            dynamic_ncols=True)
+                            ncols=100)
         for idx, (data, gt) in enumerate(training_bar):
             iter += 1
 
@@ -208,7 +208,13 @@ def main(args):
                 t = transforms.Resize(args.image_size)
                 out_train = t(out_train)
 
-            loss = criterion(out_train, gt)
+            loss_base = criterion(out_train, gt)
+            # -- mask loss --
+            # beta = 1e3
+            # loss_mask = beta * torch.relu(0.5 - model.mask.mean())
+            loss_mask = 0
+
+            loss = loss_base + loss_mask
 
             # with amp.scale_loss(loss, optimizer) as scaled_loss:
             #     scaled_loss.backward()

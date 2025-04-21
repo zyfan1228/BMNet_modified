@@ -195,6 +195,6 @@ def evaluate_all_blocks(image_path, output_folder, name='input'):
 if __name__ == '__main__':
     # 调用示例
     evaluate_all_blocks(
-        "/data3/fanzhuoyao/MY_WORKS/MyGithub/BMNet_modified/test_results/2025_04_20_17_40_23/gt_idx_380.png", 
+        "/data3/fanzhuoyao/MY_WORKS/MyGithub/BMNet_modified/test_results/2025_04_21_09_04_00/output_idx_380.png", 
         "./test_results/image_evaluation_split",
-        name="gt")
+        name="output")

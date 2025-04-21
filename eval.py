@@ -1,3 +1,4 @@
+from ast import Gt
 import os
 from re import I
 import time
@@ -18,7 +19,7 @@ from argparse import ArgumentParser
 
 from utils import PSNR, SSIM, time2file_name, AverageMeter
 from data.dotadataset import DATADataset
-from network.BMNet import BMNet
+from model.BMNet import BMNet
 
 
 def eval(args, results_dir):
@@ -58,9 +59,10 @@ def eval(args, results_dir):
                                  pin_memory=True)
 
     print('################# Testing ##################')
-    save_idxs = [350, 355, 360, 365, 370, 375, 380]
+    save_idxs = [250, 300]
     for idx, (data, gt) in enumerate(tqdm(test_dataloader, ncols=125, colour='green')):
-        # break
+        if idx not in save_idxs:
+            continue
         bs = data.shape[0]
         img_test = data.to(device)
         gt = gt.to(device)
@@ -120,10 +122,10 @@ def eval(args, results_dir):
             "(cr1 cr2) c h w -> c (cr1 h) (cr2 w)", 
             cr1=cr1, cr2=cr2
         )
-        compare_mask(mask_origin, mask_best, results_dir)
+        compare_diff(mask_origin, mask_best, results_dir)
     
 
-def compare_mask(mask_origin, mask_best, results_dir):
+def compare_diff(mask_origin, mask_best, results_dir):
     transm_origin = mask_origin.sum() / mask_origin.size
     transm_best = mask_best.sum() / mask_best.size
 
@@ -230,13 +232,42 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # load model and make model saving/log dir
-    date_time = str(datetime.datetime.now())
-    date_time = time2file_name(date_time)
-    results_dir = os.path.join(args.results_path, date_time)
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
+    # -- load model and make model saving/log dir --
+    # date_time = str(datetime.datetime.now())
+    # date_time = time2file_name(date_time)
+    # results_dir = os.path.join(args.results_path, date_time)
+    # if not os.path.exists(results_dir):
+    #     os.makedirs(results_dir)
 
-    cr1, cr2 = args.cs_ratio
+    # cr1, cr2 = args.cs_ratio
 
-    eval(args, results_dir)
+    # eval(args, results_dir)
+
+
+    # -- compare outputs' mse heatmap --
+    output_path = './test_results/2025_04_21_13_42_29/output_idx_380.png'
+    gt_path = './test_results/2025_04_21_13_42_29/gt_idx_380.png'
+
+    output = np.array(Image.open(output_path))
+    gt = np.array(Image.open(gt_path))
+
+    # breakpoint()
+    mse_diff = (gt - output) ** 2
+    mse_diff_normalized = (mse_diff - mse_diff.min()) / (mse_diff.max() - mse_diff.min())
+
+    plt.figure(figsize=(8, 6))
+    heatmap = plt.imshow(
+        mse_diff_normalized, 
+        cmap='turbo',  
+        vmin=0, 
+        vmax=np.max(mse_diff_normalized)
+    )
+    plt.colorbar(heatmap, label='MSE Value')  # 添加颜色条
+    plt.title("Element-wise MSE Heatmap (Single Channel)")
+    plt.axis('off')  # 可选：关闭坐标轴
+
+    output_dir = "./"
+    os.makedirs(output_dir, exist_ok=True)  # 创建输出目录
+    output_path = os.path.join(output_dir, "mse_diff_heatmap.png")
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)  # 保存为PNG，高分辨率
+    print(f"热力图已保存至: {output_path}")

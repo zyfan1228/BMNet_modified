@@ -101,8 +101,8 @@ def main(args):
             print("=> no model weights found at '{}'".format(checkpoint_filename))
 
     # loss and optimizer
-    # criterion = nn.MSELoss().cuda()
-    criterion = nn.L1Loss().cuda()
+    criterion = nn.MSELoss().cuda()
+    # criterion = nn.L1Loss().cuda()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -172,11 +172,10 @@ def main(args):
         training_bar = tqdm(train_dataloader, 
                             desc=f"[Epoch {epoch_i}/{end_epoch}]", 
                             colour='yellow',
-                            ncols=100)
+                            ncols=125)
         for idx, (data, gt) in enumerate(training_bar):
             iter += 1
 
-            # model.zero_grad()
             optimizer.zero_grad()
 
             bs = data.shape[0]
@@ -226,7 +225,7 @@ def main(args):
             epoch_avg_loss += loss.detach().cpu()
             epoch_avg_loss = epoch_avg_loss / (idx + 1)
             out_train = torch.clamp(out_train, 0., 1.)
-            psnr_train = batch_PSNR(out_train, img_train, 1.)
+            psnr_train = batch_PSNR(out_train, gt, 1.)
             psnr_train = torch.as_tensor(float(psnr_train)).cuda()
             if args.local_rank != -1:
                 loss = reduce_tensor(loss)
@@ -256,7 +255,7 @@ def main(args):
             show_test = 0
             print('################# Validing ##################')
             for _, (data, gt) in enumerate(tqdm(test_dataloader, 
-                                                dynamic_ncols=True, 
+                                                ncols=125, 
                                                 colour='blue')):
                 bs = data.shape[0]
                 img_test = data.cuda()
@@ -307,7 +306,7 @@ def main(args):
 
             is_best = psnr_avg_meter.avg > best_psnr
             if args.local_rank in [-1, 0] and is_best:
-                best_psnr = max(psnr_avg_meter.avg, best_psnr)
+                best_psnr = psnr_avg_meter.avg
                 save_checkpoint(
                     {
                         'epoch': epoch_i,

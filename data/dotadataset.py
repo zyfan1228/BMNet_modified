@@ -45,7 +45,7 @@ class DATADataset(data.Dataset):
         self.img_list = sorted(os.listdir(self.img_path))
         
         # self.cr = cr
-        torch.manual_seed(42)
+        # torch.manual_seed(42)
         self.tfs = transforms.Compose([
             transforms.ToTensor(),
         ])
@@ -62,6 +62,7 @@ class DATADataset(data.Dataset):
             gt = self.tfs(gt)
         else:
             gt = img
+            
         # img_ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
         # img_ycrcb = self.tfs(img_ycrcb)
         # img_y = img_ycrcb[0, :, :][None, :, :]

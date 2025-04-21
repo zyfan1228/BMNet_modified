@@ -1,13 +1,15 @@
 import os
+
 import numpy as np
 import torch
-torch.set_default_tensor_type(torch.DoubleTensor)
-from data.dotadataset import make_dataset
 from torch.utils.data import DataLoader
-from network.BMNet import BMNet
 from thop import profile
 
+from model.BMNet import BMNet
+from data.dotadataset import make_dataset
 
+
+torch.set_default_tensor_type(torch.DoubleTensor)
 repetitions = 100
 
 model = BMNet(num_stage=10, cs_ratio=(2, 2)).cuda()

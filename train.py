@@ -64,7 +64,7 @@ def main(args):
                                       num_workers=6,
                                       persistent_workers=True)
     test_dataloader = DataLoader(test_dataset, 
-                                 batch_size=3, 
+                                 batch_size=1, 
                                  shuffle=False, 
                                  num_workers=2,
                                  pin_memory=True)
@@ -101,8 +101,8 @@ def main(args):
             print("=> no model weights found at '{}'".format(checkpoint_filename))
 
     # loss and optimizer
-    criterion = nn.MSELoss().cuda()
-    # criterion = nn.L1Loss().cuda()
+    # criterion = nn.MSELoss()
+    criterion = nn.L1Loss()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -248,7 +248,7 @@ def main(args):
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
 
-        if args.local_rank in [-1, 0] and (idx + 1) % 2 == 0:
+        if args.local_rank in [-1, 0] and (epoch_i + 1) % 2 == 0:
             # evaluation
             psnr_avg_meter = AverageMeter()
             model.eval()

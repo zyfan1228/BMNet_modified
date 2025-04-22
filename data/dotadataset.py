@@ -3,8 +3,9 @@ import random
 
 # import cv2
 import torch
-import torch.utils.data as data
+from torch.utils.data import Dataset
 from torchvision import transforms
+import PIL
 from PIL import Image
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def make_dataset(train_dir, test_dir, cr, ycrcb=False, name=False, defocus=True)
     return train_dataset, test_dataset
 
 
-class DATADataset(data.Dataset):
+class DATADataset(Dataset):
     def __init__(self, imgs_path, cr, ycrcb=False, name=False, defocus=True):
         self.ycrcb = ycrcb
         self.name = name
@@ -62,7 +63,7 @@ class DATADataset(data.Dataset):
             gt = self.tfs(gt)
         else:
             gt = img
-            
+
         # img_ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
         # img_ycrcb = self.tfs(img_ycrcb)
         # img_y = img_ycrcb[0, :, :][None, :, :]
@@ -75,6 +76,51 @@ class DATADataset(data.Dataset):
         #     return img_y
 
         return img, gt
+
+    def __len__(self):
+        return len(self.img_list)
+
+
+# -- Dataset for MAE --
+class MAEDataset(Dataset):
+    def __init__(self, imgs_path, blur, kernel_size, sigma):
+        self.img_path = os.path.join(imgs_path, 'gt')
+        self.img_list = sorted(os.listdir(self.img_path))
+        
+        self.tfs = transforms.Compose([
+            # transforms.RandomResizedCrop(224, scale=(0.2, 1.0), interpolation=3),
+            transforms.RandomCrop(224),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ToTensor(),
+        ])
+        self.blur = transforms.GaussianBlur(kernel_size, sigma) if blur else transforms.Lambda(lambda x: x)
+
+    def __getitem__(self, index):
+        img_path = os.path.join(self.img_path, self.img_list[index])
+        img = self.tfs(Image.open(img_path))
+
+        return self.blur(img), img
+
+    def __len__(self):
+        return len(self.img_list)
+    
+
+class MAEDatasetEval(Dataset):
+    def __init__(self, imgs_path, blur, kernel_size, sigma):
+        self.img_path = os.path.join(imgs_path, 'gt')
+        self.img_list = sorted(os.listdir(self.img_path))
+        
+        self.tfs = transforms.Compose([
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+        ])
+        self.blur = transforms.GaussianBlur(kernel_size, sigma) if blur else transforms.Lambda(lambda x: x)
+
+    def __getitem__(self, index):
+        img_path = os.path.join(self.img_path, self.img_list[index])
+        img = self.tfs(Image.open(img_path))
+
+        return self.blur(img), img
 
     def __len__(self):
         return len(self.img_list)

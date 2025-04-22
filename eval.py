@@ -18,8 +18,8 @@ from matplotlib.colors import LinearSegmentedColormap
 from argparse import ArgumentParser
 
 from utils import PSNR, SSIM, time2file_name, AverageMeter
-from data.dotadataset import DATADataset
-from model.BMNet import BMNet
+from data.dotadataset import DATADataset, MAEDatasetEval
+from model import BMNet, mae_vit_base_patch16
 
 
 def eval(args, results_dir):
@@ -32,14 +32,29 @@ def eval(args, results_dir):
     ssim_avg_meter = AverageMeter()
     # show_test = args.num_show
 
-    model = BMNet(in_chans=1, 
+    if args.mae:
+        model = mae_vit_base_patch16().to(device)
+        test_dataset = MAEDatasetEval(args.data_path, 
+                                      args.blur, 
+                                      args.kernel_size, 
+                                      args.sigma)
+
+    else:
+        model = BMNet(in_chans=1, 
                   num_stage=10, 
                   embed_dim=32, 
                   cs_ratio=args.cs_ratio).to(device)
+        
+        test_dataset = DATADataset(args.data_path, 
+                               cr=max(args.cs_ratio),
+                               defocus=args.defocus)
+        print(f"Defocus data is {args.defocus}")
+
     ckpt_path = os.path.join(args.model_path, "model_best.pth")
     ckpt = torch.load(ckpt_path)
 
-    mask = ckpt['mask'].to(device)
+    if args.mae == False:
+        mask = ckpt['mask'].to(device)
     model_ckpt = ckpt['state_dict']
     model_ckpt = {k.replace('module.', ''): v for k, v in model_ckpt.items()}
     if 'mask' in model_ckpt: 
@@ -47,11 +62,6 @@ def eval(args, results_dir):
     model.load_state_dict(model_ckpt, strict=False)
     model.to(device)
     model.eval()
-
-    test_dataset = DATADataset(args.data_path, 
-                               cr=max(args.cs_ratio),
-                               defocus=args.defocus)
-    print(f"Defocus data is {args.defocus}")
     
     test_dataloader = DataLoader(test_dataset, 
                                  batch_size=1, 
@@ -60,39 +70,47 @@ def eval(args, results_dir):
                                  pin_memory=True)
 
     print('################# Testing ##################')
-    save_idxs = [250, 300]
+    save_idxs = [0, 5, 10, 25, 50]
     for idx, (data, gt) in enumerate(tqdm(test_dataloader, ncols=125, colour='green')):
         if idx not in save_idxs:
             continue
-        bs = data.shape[0]
-        img_test = data.to(device)
-        gt = gt.to(device)
 
-        if args.resize_size > 0:
-            t = transforms.Resize(args.resize_size)
-            input_img = t(img_test)
+        if args.mae:
+            data = data.to(device)
+            gt = gt.to(device)
+
+            with torch.no_grad():
+                _, out_test, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
         else:
-            input_img = img_test
-
-        input_mask = mask.unsqueeze(0).expand(bs, -1, -1, -1, -1).to(device) * model.scaler
-
-        input_img = einops.rearrange(input_img, 
-                                     "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
-                                     cr1=cr1, cr2=cr2)
-
-        meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
-
-        with torch.no_grad():
-            torch.cuda.synchronize()
-            st = time.time()
-            out_test = model(meas, input_mask)
-            torch.cuda.synchronize()
-            ed = time.time()
-            time_avg_meter.update(ed - st)
+            bs = data.shape[0]
+            img_test = data.to(device)
+            gt = gt.to(device)
 
             if args.resize_size > 0:
-                t = transforms.Resize(args.image_size)
-                out_test = t(out_test)
+                t = transforms.Resize(args.resize_size)
+                input_img = t(img_test)
+            else:
+                input_img = img_test
+
+            input_mask = mask.unsqueeze(0).expand(bs, -1, -1, -1, -1).to(device) * model.scaler
+
+            input_img = einops.rearrange(input_img, 
+                                        "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
+                                        cr1=cr1, cr2=cr2)
+
+            meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
+
+            with torch.no_grad():
+                torch.cuda.synchronize()
+                st = time.time()
+                out_test = model(meas, input_mask)
+                torch.cuda.synchronize()
+                ed = time.time()
+                time_avg_meter.update(ed - st)
+
+                if args.resize_size > 0:
+                    t = transforms.Resize(args.image_size)
+                    out_test = t(out_test)
 
         out_test = torch.clamp(out_test, 0, 1)
 
@@ -230,6 +248,12 @@ if __name__ == "__main__":
     parser.add_argument('--defocus', action='store_true', help='whether do dedocus sci')
 
     parser.add_argument('--seed', type=int, default=42, help='random seed')
+
+    ## -- for mae exp --
+    parser.add_argument('--mae', action='store_true', help='whether do mae exp')
+    parser.add_argument('--blur', action='store_true', help='whether do blur images')
+    parser.add_argument('--kernel_size', type=int, default=3)
+    parser.add_argument('--sigma', type=float, default=1.0)
 
     args = parser.parse_args()
 

@@ -20,11 +20,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import MultiStepLR
-# from timm.scheduler import CosineLRScheduler
+from timm.scheduler import CosineLRScheduler
 
-from data.dotadataset import make_dataset
+from data.dotadataset import MAEDatasetEval, make_dataset, MAEDataset
 from utils import batch_PSNR, time2file_name, AverageMeter
-from model import BMNet
+from model import BMNet, mae_vit_base_patch16
 
 
 def main(args):
@@ -40,10 +40,20 @@ def main(args):
 
     train_dir = args.data_path
     test_dir = train_dir.replace('train', 'valid')
-    train_dataset, test_dataset = make_dataset(train_dir, 
-                                               test_dir, 
-                                               cr=max(args.cs_ratio), 
-                                               defocus=args.defocus)
+    if args.mae:
+        train_dataset = MAEDataset(train_dir, 
+                                   args.blur, 
+                                   args.kernel_size, 
+                                   args.sigma)
+        test_dataset = MAEDatasetEval(test_dir, 
+                                      args.blur, 
+                                      args.kernel_size, 
+                                      args.sigma)
+    else:
+        train_dataset, test_dataset = make_dataset(train_dir, 
+                                                   test_dir, 
+                                                   cr=max(args.cs_ratio), 
+                                                   defocus=args.defocus)
 
     if args.local_rank != -1:
         sampler = DistributedSampler(train_dataset, 
@@ -70,19 +80,24 @@ def main(args):
                                  pin_memory=True)
 
     # model defination
-    model = BMNet(
-        in_chans=args.n_channels,
-        embed_dim=32,
-        num_stage=args.num_stage,
-        cs_ratio=args.cs_ratio,
-        scaler=args.scaler,
-        use_checkpoint=args.use_checkpoint
-    ).cuda()
+    if args.mae:
+        model = mae_vit_base_patch16()
+        model.cuda()
+    else:
+        model = BMNet(
+            in_chans=args.n_channels,
+            embed_dim=32,
+            num_stage=args.num_stage,
+            cs_ratio=args.cs_ratio,
+            scaler=args.scaler,
+            use_checkpoint=args.use_checkpoint
+        ).to('cuda')
 
     # args.lm: learnable mask or not
-    model.mask = nn.Parameter(mask.cuda(), requires_grad=args.lm)
-    print(f"Learnable mask is {model.mask.requires_grad}")
-    save_mask(model.mask.detach().cpu(), os.path.join(save_dir, "mask_origin.npy"))
+    if args.mae == False:
+        model.mask = nn.Parameter(mask.cuda(), requires_grad=args.lm)
+        print(f"Learnable mask is {model.mask.requires_grad}")
+        save_mask(model.mask.detach().cpu(), os.path.join(save_dir, "mask_origin.npy"))
 
     if args.finetune is not None:
         checkpoint_filename = args.finetune
@@ -100,30 +115,40 @@ def main(args):
         else:
             print("=> no model weights found at '{}'".format(checkpoint_filename))
 
-    # loss and optimizer
-    # criterion = nn.MSELoss()
-    criterion = nn.L1Loss()
+    if args.mae:
+        optimizer = torch.optim.Adam(model.parameters(), 
+                                     lr=1e-3 * args.batch_size / 256, 
+                                     weight_decay=0.05)
+    else:
+        # loss and optimizer
+        # criterion = nn.MSELoss()
+        criterion = nn.L1Loss()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
     if args.local_rank in [-1, 0]:
         tot_grad_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print('number of params (M): %.2f' % (tot_grad_params / 1.e6))
 
     # lr scheduler
-    # scheduler = CosineLRScheduler(
-    #     optimizer=optimizer,
-    #     t_initial=args.end_epoch,
-    #     lr_min=args.min_learning_rate,
-    #     warmup_t=args.warmup_steps,
-    #     warmup_lr_init=args.init_learning_rate
-    # )
-    scheduler = MultiStepLR(
+    warmup_epochs = 40
+    num_training_steps = args.end_epoch * len(train_dataloader)
+    scheduler = CosineLRScheduler(
         optimizer=optimizer,
-        milestones=[125, 150, 175],
-        gamma=0.5,
-        verbose=True
+        t_initial=num_training_steps - warmup_epochs * len(train_dataloader),
+        lr_min=args.learning_rate / 100.,
+        warmup_t=warmup_epochs * len(train_dataloader),
+        warmup_lr_init=args.learning_rate / 5.,
+        warmup_prefix=True,
+        cycle_decay=1,
+        t_in_epochs=False
     )
+    # scheduler = MultiStepLR(
+    #     optimizer=optimizer,
+    #     milestones=[125, 150, 175],
+    #     gamma=0.5,
+    #     verbose=True
+    # )
 
     # model, optimizer = amp.initialize(model, optimizer, opt_level=args.opt_level)
 
@@ -178,52 +203,57 @@ def main(args):
 
             optimizer.zero_grad()
 
-            bs = data.shape[0]
+            if args.mae:
+                data = data.cuda()
+                gt = gt.cuda()
 
-            img_train = data.cuda()
-            gt = gt.cuda()
-
-            if args.resize_size > 0:
-                t = transforms.Resize(args.resize_size)
-                input_img = t(img_train)
+                loss, out_train, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
             else:
-                input_img = img_train
+                bs = data.shape[0]
+                img_train = data.cuda()
+                gt = gt.cuda()
 
-            input_img = einops.rearrange(input_img, 
-                                         "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
-                                         cr1=cr1, cr2=cr2)
+                if args.resize_size > 0:
+                    t = transforms.Resize(args.resize_size)
+                    input_img = t(img_train)
+                else:
+                    input_img = img_train
 
-            if isinstance(model, DDP):
-                input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) \
-                    * model.module.scaler
-            else:
-                input_mask = model.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.scaler
+                input_img = einops.rearrange(input_img, 
+                                            "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
+                                            cr1=cr1, cr2=cr2)
 
-            meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
+                if isinstance(model, DDP):
+                    input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) \
+                        * model.module.scaler
+                else:
+                    input_mask = model.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.scaler
 
-            out_train = model(meas, input_mask)
+                meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
 
-            if args.resize_size > 0:
-                t = transforms.Resize(args.image_size)
-                out_train = t(out_train)
+                out_train = model(meas, input_mask)
 
-            loss_base = criterion(out_train, gt)
-            # -- mask loss --
-            # beta = 1e3
-            # loss_mask = beta * torch.relu(0.5 - model.mask.mean())
-            loss_mask = 0
+                if args.resize_size > 0:
+                    t = transforms.Resize(args.image_size)
+                    out_train = t(out_train)
 
-            loss = loss_base + loss_mask
-
-            # with amp.scale_loss(loss, optimizer) as scaled_loss:
-            #     scaled_loss.backward()
+                loss_base = criterion(out_train, gt)
+                # -- mask loss --
+                # beta = 1e3
+                # loss_mask = beta * torch.relu(0.5 - model.mask.mean())
+                loss_mask = 0
+                loss = loss_base + loss_mask
 
             loss.backward()
             optimizer.step()
 
+            # -- scheduler --
+            if args.mae:
+                scheduler.step_update(epoch_i * len(train_dataloader) + idx)
+
             # results
             epoch_avg_loss += loss.detach().cpu()
-            epoch_avg_loss = epoch_avg_loss / (idx + 1)
+
             out_train = torch.clamp(out_train, 0., 1.)
             psnr_train = batch_PSNR(out_train, gt, 1.)
             psnr_train = torch.as_tensor(float(psnr_train)).cuda()
@@ -242,13 +272,17 @@ def main(args):
                                      "Recon_loss": f"{loss.item():.4f}",
                                      "PSNR_trian": f"{psnr_train.item():.4f}"})
 
+        epoch_avg_loss = epoch_avg_loss / (idx + 1)
+        writer.add_scalar('epoch_avg_loss', epoch_avg_loss.item(), epoch_i + 1)
+        print(f"epoch_avg_loss: {epoch_avg_loss}")
+        
         if args.local_rank in [-1, 0]:
             torch.cuda.synchronize()
             time_end = time.time()
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
 
-        if args.local_rank in [-1, 0] and (epoch_i + 1) % 2 == 0:
+        if args.local_rank in [-1, 0] and (epoch_i + 1) % 5 == 0:
             # evaluation
             psnr_avg_meter = AverageMeter()
             model.eval()
@@ -257,48 +291,56 @@ def main(args):
             for _, (data, gt) in enumerate(tqdm(test_dataloader, 
                                                 ncols=125, 
                                                 colour='blue')):
-                bs = data.shape[0]
-                img_test = data.cuda()
-                gt = gt.cuda()
+                if args.mae:
+                    data = data.cuda()
+                    gt = gt.cuda()
 
-                if args.resize_size > 0:
-                    t = transforms.Resize(args.resize_size)
-                    input_img = t(img_test)
+                    with torch.no_grad():
+                        _, model_out, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
+                    model_out = torch.clamp(model_out, 0, 1)
                 else:
-                    input_img = img_test
+                    bs = data.shape[0]
+                    img_test = data.cuda()
+                    gt = gt.cuda()
 
-                if show_test:
-                    test = data[0, :]
-                    writer.add_image(f'img_{show_test}', test)
+                    if args.resize_size > 0:
+                        t = transforms.Resize(args.resize_size)
+                        input_img = t(img_test)
+                    else:
+                        input_img = img_test
 
-                input_img = einops.rearrange(input_img, 
-                                             "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
-                                             cr1=cr1, cr2=cr2)
-                if isinstance(model, DDP):
-                    input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) \
-                        * model.module.scaler
-                else:
-                    input_mask = model.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.scaler
-                meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
+                    if show_test:
+                        test = data[0, :]
+                        writer.add_image(f'img_{show_test}', test)
 
-                if show_test:
-                    test = meas[0, :]
-                    writer.add_images(f'measurement_{show_test}', test)
+                    input_img = einops.rearrange(input_img, 
+                                                "b c (cr1 h) (cr2 w) -> b (cr1 cr2) c h w", 
+                                                cr1=cr1, cr2=cr2)
+                    if isinstance(model, DDP):
+                        input_mask = model.module.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) \
+                            * model.module.scaler
+                    else:
+                        input_mask = model.mask.unsqueeze(0).expand(bs, -1, -1, -1, -1) * model.scaler
+                    meas = torch.sum(input_img * input_mask, dim=1, keepdim=True)
 
-                with torch.no_grad():
-                    out_test = model(meas, input_mask)
-                    if args.resize_size:
-                        t = transforms.Resize(args.image_size)
-                        out_test = t(out_test)
+                    if show_test:
+                        test = meas[0, :]
+                        writer.add_images(f'measurement_{show_test}', test)
 
-                out_test = torch.clamp(out_test, 0, 1)
+                    with torch.no_grad():
+                        out_test = model(meas, input_mask)
+                        if args.resize_size:
+                            t = transforms.Resize(args.image_size)
+                            out_test = t(out_test)
 
-                if show_test:
-                    test = out_test[0, :]
-                    writer.add_image(f'reconstruction_{show_test}', test, epoch_i)
-                    show_test = show_test - 1
+                    model_out = torch.clamp(out_test, 0, 1)
 
-                psnr_test = batch_PSNR(out_test, gt, 1.)
+                    if show_test:
+                        test = model_out[0, :]
+                        writer.add_image(f'reconstruction_{show_test}', test, epoch_i)
+                        show_test = show_test - 1
+
+                psnr_test = batch_PSNR(model_out, gt, 1.)
                 psnr_avg_meter.update(psnr_test)
 
             writer.add_scalar("avg", psnr_avg_meter.avg.item(), epoch_i)
@@ -307,18 +349,32 @@ def main(args):
             is_best = psnr_avg_meter.avg > best_psnr
             if args.local_rank in [-1, 0] and is_best:
                 best_psnr = psnr_avg_meter.avg
-                save_checkpoint(
+                if args.mae:
+                    save_checkpoint(
                     {
-                        'epoch': epoch_i,
+                        # 'epoch': epoch_i,
                         'state_dict': model.state_dict(),
-                        'best_psnr': best_psnr,
-                        'optimizer': optimizer.state_dict(),
+                        # 'best_psnr': best_psnr,
+                        # 'optimizer': optimizer.state_dict(),
                         # 'amp': amp.state_dict(),
-                        'mask': model.module.mask if isinstance(model, DDP) else model.mask
+                        # 'mask': model.module.mask if isinstance(model, DDP) else model.mask
                     }, 
                     is_best, 
-                    filename=os.path.join(save_dir, f'model_{epoch_i}_psnr{best_psnr:.4f}.pth')
-                )
+                    filename=os.path.join(save_dir, f'model_{epoch_i + 1}_psnr{best_psnr:.4f}.pth')
+                    )
+                else:
+                    save_checkpoint(
+                        {
+                            'epoch': epoch_i,
+                            'state_dict': model.state_dict(),
+                            'best_psnr': best_psnr,
+                            'optimizer': optimizer.state_dict(),
+                            # 'amp': amp.state_dict(),
+                            'mask': model.module.mask if isinstance(model, DDP) else model.mask
+                        }, 
+                        is_best, 
+                        filename=os.path.join(save_dir, f'model_{epoch_i + 1}_psnr{best_psnr:.4f}.pth')
+                    )
                 print('best test psnr till now %.4f' % best_psnr)
                 print('checkpoint with %d iterations has been saved. \n' % epoch_i)
 
@@ -331,7 +387,7 @@ def main(args):
 
             psnr_avg_meter.reset()
 
-        scheduler.step()
+        # scheduler.step()
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth'):
     torch.save(state, filename)
@@ -395,6 +451,12 @@ if __name__ == "__main__":
     parser.add_argument('--opt-level', type=str, default='O0', help='use fp32 or fp16')
     parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument("--seed", default=42, type=int)
+
+    ## -- for mae exp --
+    parser.add_argument('--mae', action='store_true', help='whether do mae exp')
+    parser.add_argument('--blur', action='store_true', help='whether do blur images')
+    parser.add_argument('--kernel_size', type=int, default=3)
+    parser.add_argument('--sigma', type=float, default=1.0)
     args = parser.parse_args()
 
     start_epoch = args.start_epoch

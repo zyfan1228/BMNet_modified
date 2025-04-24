@@ -24,7 +24,7 @@ from timm.scheduler import CosineLRScheduler
 
 from data.dotadataset import MAEDatasetEval, make_dataset, MAEDataset
 from utils import batch_PSNR, time2file_name, AverageMeter
-from model import BMNet, mae_vit_base_patch16
+from model import BMNet, mae_vit_base_patch16, mae_vit_tiny_mine
 
 
 def main(args):
@@ -82,6 +82,7 @@ def main(args):
     # model defination
     if args.mae:
         model = mae_vit_base_patch16()
+        # model = mae_vit_tiny_mine()
         model.cuda()
     else:
         model = BMNet(
@@ -91,7 +92,7 @@ def main(args):
             cs_ratio=args.cs_ratio,
             scaler=args.scaler,
             use_checkpoint=args.use_checkpoint
-        ).to('cuda')
+        ).cuda()
 
     # args.lm: learnable mask or not
     if args.mae == False:
@@ -116,9 +117,9 @@ def main(args):
             print("=> no model weights found at '{}'".format(checkpoint_filename))
 
     if args.mae:
-        optimizer = torch.optim.Adam(model.parameters(), 
-                                     lr=1e-3 * args.batch_size / 256, 
-                                     weight_decay=0.05)
+        optimizer = torch.optim.AdamW(model.parameters(), 
+                                      lr=5e-5, #* args.batch_size / 256, 
+                                      weight_decay=0.1)
     else:
         # loss and optimizer
         # criterion = nn.MSELoss()
@@ -131,14 +132,14 @@ def main(args):
         print('number of params (M): %.2f' % (tot_grad_params / 1.e6))
 
     # lr scheduler
-    warmup_epochs = 40
+    warmup_epochs = 10
     num_training_steps = args.end_epoch * len(train_dataloader)
     scheduler = CosineLRScheduler(
         optimizer=optimizer,
-        t_initial=num_training_steps - warmup_epochs * len(train_dataloader),
-        lr_min=args.learning_rate / 100.,
+        t_initial=num_training_steps,
+        lr_min=1e-6,
         warmup_t=warmup_epochs * len(train_dataloader),
-        warmup_lr_init=args.learning_rate / 5.,
+        warmup_lr_init=1e-6,
         warmup_prefix=True,
         cycle_decay=1,
         t_in_epochs=False
@@ -207,7 +208,7 @@ def main(args):
                 data = data.cuda()
                 gt = gt.cuda()
 
-                loss, out_train, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
+                loss, out_train, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.1)
             else:
                 bs = data.shape[0]
                 img_train = data.cuda()
@@ -282,7 +283,7 @@ def main(args):
         if args.local_rank in [-1, 0]:
             print('time cost', time_end - time_start)
 
-        if args.local_rank in [-1, 0] and (epoch_i + 1) % 5 == 0:
+        if args.local_rank in [-1, 0] and (epoch_i + 1) % 10 == 0:
             # evaluation
             psnr_avg_meter = AverageMeter()
             model.eval()
@@ -296,8 +297,8 @@ def main(args):
                     gt = gt.cuda()
 
                     with torch.no_grad():
-                        _, model_out, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
-                    model_out = torch.clamp(model_out, 0, 1)
+                        _, model_out, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.1)
+                        model_out = torch.clamp(model_out, 0., 1.)
                 else:
                     bs = data.shape[0]
                     img_test = data.cuda()
@@ -407,7 +408,7 @@ def save_mask(mask_tensor, save_path):
 
 
 if __name__ == "__main__":
-    seed_value = 42
+    seed_value = 3407
     torch.manual_seed(seed_value)
     torch.cuda.manual_seed(seed_value)
     torch.cuda.manual_seed_all(seed_value)

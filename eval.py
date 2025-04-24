@@ -19,7 +19,7 @@ from argparse import ArgumentParser
 
 from utils import PSNR, SSIM, time2file_name, AverageMeter
 from data.dotadataset import DATADataset, MAEDatasetEval
-from model import BMNet, mae_vit_base_patch16
+from model import BMNet, mae_vit_base_patch16, mae_vit_tiny_mine
 
 
 def eval(args, results_dir):
@@ -33,7 +33,8 @@ def eval(args, results_dir):
     # show_test = args.num_show
 
     if args.mae:
-        model = mae_vit_base_patch16().to(device)
+        # model = mae_vit_base_patch16().to(device)
+        model = mae_vit_tiny_mine().to(device)
         test_dataset = MAEDatasetEval(args.data_path, 
                                       args.blur, 
                                       args.kernel_size, 
@@ -50,7 +51,7 @@ def eval(args, results_dir):
                                defocus=args.defocus)
         print(f"Defocus data is {args.defocus}")
 
-    ckpt_path = os.path.join(args.model_path, "model_best.pth")
+    ckpt_path = os.path.join(args.model_path, args.ckpt_name)
     ckpt = torch.load(ckpt_path)
 
     if args.mae == False:
@@ -70,7 +71,7 @@ def eval(args, results_dir):
                                  pin_memory=True)
 
     print('################# Testing ##################')
-    save_idxs = [0, 5, 10, 25, 50]
+    save_idxs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     for idx, (data, gt) in enumerate(tqdm(test_dataloader, ncols=125, colour='green')):
         if idx not in save_idxs:
             continue
@@ -80,7 +81,10 @@ def eval(args, results_dir):
             gt = gt.to(device)
 
             with torch.no_grad():
-                _, out_test, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
+                loss, out_test, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
+                test_psnr = 20 * torch.log10(1.0 / torch.sqrt(loss))
+                print(f"{idx} PSNR: {test_psnr:.4f} dB")
+                # breakpoint()
         else:
             bs = data.shape[0]
             img_test = data.to(device)
@@ -238,6 +242,9 @@ if __name__ == "__main__":
                         type=str, 
                         default='./test_results', 
                         help='results for reconstructed images')
+    parser.add_argument('--ckpt_name', 
+                        type=str, 
+                        default='model_best.pth')
 
     parser.add_argument('--image_size', type=int, nargs='+', default=[512, 512], help='image size')
     parser.add_argument('--resize_size', type=int, nargs='+', default=-1, help='image size')

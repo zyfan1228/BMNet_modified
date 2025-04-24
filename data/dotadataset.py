@@ -81,46 +81,80 @@ class DATADataset(Dataset):
         return len(self.img_list)
 
 
-# -- Dataset for MAE --
+# --- Placeholder for Dataset (if not imported) ---
 class MAEDataset(Dataset):
-    def __init__(self, imgs_path, blur, kernel_size, sigma):
-        self.img_path = os.path.join(imgs_path, 'gt')
-        self.img_list = sorted(os.listdir(self.img_path))
-        
+    def __init__(self, imgs_path, blur, kernel_size, sigma, img_size=224, random_crop_scale=(0.2, 1.0)):
+        self.img_dir = os.path.join(imgs_path, 'gt') # Assuming 'gt' subdirectory exists
+        if not os.path.isdir(self.img_dir):
+             raise FileNotFoundError(f"Directory not found: {self.img_dir}. Ensure imgs_path points to parent of 'gt'.")
+        self.img_list = sorted([f for f in os.listdir(self.img_dir) if os.path.isfile(os.path.join(self.img_dir, f))])
+        if not self.img_list:
+            raise ValueError(f"No images found in {self.img_dir}")
+
         self.tfs = transforms.Compose([
-            # transforms.RandomResizedCrop(224, scale=(0.2, 1.0), interpolation=3),
-            transforms.RandomCrop(224),
+            transforms.RandomResizedCrop(
+                img_size, 
+                scale=random_crop_scale, 
+                interpolation=transforms.InterpolationMode.BICUBIC
+            ),
             transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+            ),
             transforms.ToTensor(),
+            # No Normalize needed if norm_pix_loss=False and using Sigmoid
         ])
-        self.blur = transforms.GaussianBlur(kernel_size, sigma) if blur else transforms.Lambda(lambda x: x)
+        # Apply blur transformation only if blur is True
+        self.blur_transform = transforms.GaussianBlur(kernel_size, sigma=sigma) if blur else transforms.Lambda(lambda x: x)
+        print(f"Dataset initialized for {imgs_path}. Found {len(self.img_list)} images. Blur: {blur}")
 
     def __getitem__(self, index):
-        img_path = os.path.join(self.img_path, self.img_list[index])
-        img = self.tfs(Image.open(img_path))
+        img_path = os.path.join(self.img_dir, self.img_list[index])
+        try:
+            img_clean = Image.open(img_path)
+        except Exception as e:
+            print(f"Error opening or converting image {img_path}: {e}")
 
-        return self.blur(img), img
+        img_clean_tensor = self.tfs(img_clean)
+        img_input = self.blur_transform(img_clean_tensor) # Apply blur to the tensor
+
+        return img_input, img_clean_tensor
 
     def __len__(self):
         return len(self.img_list)
-    
 
 class MAEDatasetEval(Dataset):
-    def __init__(self, imgs_path, blur, kernel_size, sigma):
-        self.img_path = os.path.join(imgs_path, 'gt')
-        self.img_list = sorted(os.listdir(self.img_path))
-        
+    def __init__(self, imgs_path, blur, kernel_size, sigma, img_size=224):
+        self.img_dir = os.path.join(imgs_path, 'gt') # Assuming 'gt' subdirectory exists
+        if not os.path.isdir(self.img_dir):
+             raise FileNotFoundError(f"Directory not found: {self.img_dir}. Ensure imgs_path points to parent of 'gt'.")
+        self.img_list = sorted([f for f in os.listdir(self.img_dir) if os.path.isfile(os.path.join(self.img_dir, f))])
+        if not self.img_list:
+            raise ValueError(f"No images found in {self.img_dir}")
+
         self.tfs = transforms.Compose([
-            transforms.CenterCrop(224),
+            # transforms.Grayscale(num_output_channels=1), # Add if your images are RGB
+            # transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC), # Resize first
+            transforms.CenterCrop(img_size),
             transforms.ToTensor(),
+             # No Normalize
         ])
-        self.blur = transforms.GaussianBlur(kernel_size, sigma) if blur else transforms.Lambda(lambda x: x)
+        self.blur_transform = transforms.GaussianBlur(kernel_size, sigma=sigma) if blur else transforms.Lambda(lambda x: x)
+        print(f"Eval Dataset initialized for {imgs_path}. Found {len(self.img_list)} images. Blur: {blur}")
 
     def __getitem__(self, index):
-        img_path = os.path.join(self.img_path, self.img_list[index])
-        img = self.tfs(Image.open(img_path))
+        img_path = os.path.join(self.img_dir, self.img_list[index])
+        try:
+            img_clean = Image.open(img_path)
+        except Exception as e:
+            print(f"Error opening or converting image {img_path}: {e}")
 
-        return self.blur(img), img
+        img_clean_tensor = self.tfs(img_clean)
+        img_input = self.blur_transform(img_clean_tensor)
+
+        return img_input, img_clean_tensor
 
     def __len__(self):
         return len(self.img_list)
+# --- End Placeholder Dataset ---

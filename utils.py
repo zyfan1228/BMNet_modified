@@ -21,11 +21,12 @@ def batch_PSNR(img, imclean, data_range):
 
 
 def SSIM(img, imclean, data_range):
-    Img = img.data.cpu().numpy().astype(np.float64)
-    Iclean = imclean.data.cpu().numpy().astype(np.float64)
+    Img = img.detach().cpu().numpy().astype(np.float32)
+    Iclean = imclean.detach().cpu().numpy().astype(np.float32)
     SSIM = 0
     for i in range(Img.shape[0]):
-        SSIM += structural_similarity(Iclean[i, :, :, :], Img[i, :, :, :], data_range=data_range, channel_axis=0)
+        SSIM += structural_similarity(Iclean[i, :, :, :], Img[i, :, :, :], 
+                                      data_range=data_range, channel_axis=0)
     return (SSIM / Img.shape[0])
 
 

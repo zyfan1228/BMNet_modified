@@ -3,6 +3,7 @@ import time
 import shutil
 import datetime
 import argparse 
+import random
 
 import torch
 import numpy as np
@@ -11,9 +12,16 @@ import tensorboardX
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from timm.scheduler import CosineLRScheduler
+from PIL import Image
+from skimage.metrics import peak_signal_noise_ratio as ski_psnr
 
 from model import mae_vit_tiny_mine, mae_vit_base_patch16
 from data.dotadataset import MAEDataset, MAEDatasetEval
+
+
+# for sim_v2_gt
+mean_gt = 0.330694
+std_gt = 0.176989
 
 # --- Assume these are in separate files or defined here ---
 # from data import MAEDataset, MAEDatasetEval # Or define below
@@ -23,12 +31,73 @@ from data.dotadataset import MAEDataset, MAEDatasetEval
 
 # --- Placeholder for Utilities (if not imported) ---
 def batch_PSNR(img, imclean, data_range):
-    # Basic PSNR calculation (replace with your actual implementation)
-    # Ensure img and imclean are torch tensors in the same range [0, data_range]
-    mse = torch.mean((img - imclean) ** 2)
-    if mse == 0:
-        return float('inf')
-    return 20 * torch.log10(data_range / torch.sqrt(mse))
+    """
+    Calculates the average PSNR across a batch of images using PyTorch.
+    IMPORTANT: Ensure 'img' tensor is clamped to [0, data_range] BEFORE calling this function.
+    """
+    # 确保输入是 Tensor 且形状匹配
+    if not isinstance(img, torch.Tensor) or not isinstance(imclean, torch.Tensor):
+        raise TypeError("Inputs must be torch.Tensor")
+    if img.shape != imclean.shape:
+        raise ValueError(f"Input shapes must match: img {img.shape}, imclean {imclean.shape}")
+
+    # 计算每个像素的平方误差
+    squared_error = (img - imclean) ** 2
+
+    # 计算每张图片的 MSE (在 C, H, W 或 H, W 维度上求平均)
+    if img.ndim == 4: # NCHW
+        mse_per_image = torch.mean(squared_error, dim=(1, 2, 3))
+    elif img.ndim == 3: # NHW
+        mse_per_image = torch.mean(squared_error, dim=(1, 2))
+    else:
+        raise ValueError(f"Unsupported input dimensions: {img.ndim}. Expected 3 or 4.")
+
+    # 避免 log10(0) - 添加一个小的 epsilon
+    # 对于 MSE 接近 0 的情况，PSNR 会非常高
+    epsilon = 1e-10
+    psnr_per_image = 10.0 * torch.log10((data_range**2) / (mse_per_image + epsilon))
+
+    # 计算批次的平均 PSNR
+    average_psnr = torch.mean(psnr_per_image)
+
+    return average_psnr
+
+@torch.no_grad() 
+def calculate_masked_psnr_original_scale(
+    pred_original_img,    # (N, C, H, W) - De-normalized & Clamped prediction image
+    gt_original_img,      # (N, C, H, W) - De-normalized & Clamped ground truth image
+    mask,                 # (N, L) - Binary mask, 1 is masked
+    patchify_func,        # Callable (e.g., model.patchify)
+    in_chans,             # int
+    original_data_range   # float (e.g., 1.0 or 255.0)
+):
+    
+    device = pred_original_img.device
+
+    # --- 1. Patchify the de-normalized & clamped images ---
+    pred_original_patch = patchify_func(pred_original_img, in_chan=in_chans) # (N, L, P*P*C)
+    target_original_patch = patchify_func(gt_original_img, in_chan=in_chans) # (N, L, P*P*C)
+
+    # --- 2. Calculate PSNR per patch on the original scale ---
+    squared_error_original = (pred_original_patch - target_original_patch) ** 2
+    mse_original_per_patch = torch.mean(squared_error_original, dim=-1) # MSE per patch (N, L)
+
+    epsilon = 1e-10
+    mse_original_per_patch_safe = mse_original_per_patch + epsilon
+    psnr_original_per_patch = 10.0 * torch.log10((original_data_range**2) / mse_original_per_patch_safe) # (N, L)
+
+    # --- 3. Calculate average PSNR only on masked patches ---
+    num_masked = mask.sum()
+    if num_masked == 0:
+        return torch.tensor(0.0, device=device) # Or handle as appropriate
+
+    # Ensure mask is on the correct device and type for multiplication
+    mask_float = mask.to(device=psnr_original_per_patch.device, dtype=torch.float32)
+
+    masked_psnr_sum = (psnr_original_per_patch * mask_float).sum()
+    average_masked_psnr = masked_psnr_sum / num_masked
+
+    return average_masked_psnr
 
 def time2file_name(time_str):
     # Basic time formatting (replace with yours)
@@ -82,9 +151,9 @@ def main(args):
     train_dir = args.data_path
     # Try to find validation path, default to using train path if not easily replaceable
     test_dir = train_dir.replace('train', 'valid')
-    if not os.path.exists(os.path.join(test_dir, 'gt')):
-        print(f"Validation path {test_dir} not found, using train path {train_dir} for validation.")
-        test_dir = train_dir # Fallback to train data for validation if valid path doesn't exist
+    # if not os.path.exists(os.path.join(test_dir, 'gt')):
+    #     print(f"Validation path {test_dir} not found, using train path {train_dir} for validation.")
+    #     test_dir = train_dir # Fallback to train data for validation if valid path doesn't exist
 
     train_dataset = MAEDataset(train_dir,
                                args.blur,
@@ -138,7 +207,7 @@ def main(args):
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(),
-                                  lr=args.learning_rate * args.batch_size / 256,
+                                  lr=args.learning_rate * args.batch_size / 64,
                                   weight_decay=args.weight_decay,
                                   betas=(0.9, 0.95))
     print(f"Optimizer: AdamW, LR: {args.learning_rate}, Weight Decay: {args.weight_decay}")
@@ -152,11 +221,11 @@ def main(args):
     scheduler = CosineLRScheduler(
         optimizer=optimizer,
         t_initial=num_training_steps,
-        lr_min=1e-6,  # Keep lr_min relatively standard
+        lr_min=1e-5,  # Keep lr_min relatively standard
         warmup_t=warmup_steps,
         warmup_lr_init=1e-6, # Start warmup from a low value
         warmup_prefix=True,
-        cycle_decay=0.1, # Standard decay for cosine cycle, 1 means no decay within cycle
+        cycle_decay=1.0, # Standard decay for cosine cycle, 1 means no decay within cycle
         t_in_epochs=False # Step based on iterations
     )
 
@@ -206,13 +275,15 @@ def main(args):
              print(f"=> no weights found at '{args.finetune}'")
              start_epoch = 0
 
-
+    mean_train = torch.tensor([mean_gt]).view(1, 1, 1, 1).to(device)
+    std_train = torch.tensor([std_gt]).view(1, 1, 1, 1).to(device)
     # Training Loop
     print(f"Starting training from epoch {start_epoch + 1} to {args.end_epoch}")
     for epoch_i in range(start_epoch, args.end_epoch):
         model.train()
         epoch_loss_meter = AverageMeter()
         epoch_psnr_meter = AverageMeter()
+        epoch_masked_psnr = AverageMeter()
         epoch_start_time = time.time()
 
         lr = optimizer.param_groups[0]['lr']
@@ -222,7 +293,7 @@ def main(args):
         training_bar = tqdm(train_dataloader,
                             desc=f"[Epoch {epoch_i + 1}/{args.end_epoch}] Train",
                             colour='yellow',
-                            ncols=120) # Adjust ncols as needed
+                            ncols=125) # Adjust ncols as needed
 
         for idx, (data, gt) in enumerate(training_bar):
             current_iter = epoch_i * len(train_dataloader) + idx
@@ -234,8 +305,10 @@ def main(args):
             # --- Model Forward ---
             # Ensure your model's forward method handles unpatch_pred=True correctly
             # and that the loss calculation uses 'gt' as the target (FIXED IN MODEL FILE)
-            loss, out_train, _ = model(data, gt, unpatch_pred=True, mask_ratio=args.mask_ratio)
-
+            loss, out_train, mask = model(data, gt, unpatch_pred=True, mask_ratio=args.mask_ratio)
+            out_train = (out_train * std_train) + mean_train
+            gt = (gt * std_train) + mean_train
+            
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"ERROR: NaN or Inf loss detected at epoch {epoch_i+1}, iter {idx}. Skipping batch.")
                 # Consider logging more info or stopping training
@@ -243,7 +316,9 @@ def main(args):
 
             loss.backward()
             # Optional: Gradient Clipping
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 
+                                           max_norm=1.0, 
+                                           error_if_nonfinite=True)
             optimizer.step()
 
             # Step the scheduler after each iteration
@@ -252,14 +327,24 @@ def main(args):
             # Clamp output for PSNR calculation
             out_train = torch.clamp(out_train, 0., 1.)
             psnr_train = batch_PSNR(out_train, gt, 1.0) # data_range is 1.0 for [0,1]
+            psnr_masked = calculate_masked_psnr_original_scale(
+                out_train, 
+                gt, 
+                mask, 
+                model.patchify, 
+                in_chans=1, 
+                original_data_range=1.0
+            )
 
             epoch_loss_meter.update(loss.item(), data.size(0))
             epoch_psnr_meter.update(psnr_train.item(), data.size(0))
+            epoch_masked_psnr.update(psnr_masked.item(), data.size(0))
 
             # Logging to tqdm
             training_bar.set_postfix({
                 "Loss": f"{epoch_loss_meter.avg:.4f}",
-                "PSNR": f"{epoch_psnr_meter.avg:.2f}"
+                "PSNR": f"{epoch_psnr_meter.avg:.4f}",
+                "PSNR masked": f"{epoch_masked_psnr.avg:.4f}"
             })
 
             # Logging to TensorBoard (maybe less frequently)
@@ -268,9 +353,10 @@ def main(args):
                  writer.add_scalar('Train/iter_psnr', psnr_train.item(), current_iter)
 
 
-        print(f"Epoch {epoch_i + 1} Train Summary: Avg Loss: {epoch_loss_meter.avg:.4f}, Avg PSNR: {epoch_psnr_meter.avg:.2f} dB")
+        print(f"Epoch {epoch_i + 1} Train Summary: Avg Loss: {epoch_loss_meter.avg:.4f}, Avg PSNR: {epoch_psnr_meter.avg:.4f} dB")
         writer.add_scalar('Train/epoch_avg_loss', epoch_loss_meter.avg, epoch_i + 1)
         writer.add_scalar('Train/epoch_avg_psnr', epoch_psnr_meter.avg, epoch_i + 1)
+        writer.add_scalar('Train/epoch_psnr_masked', epoch_masked_psnr.avg, epoch_i + 1)
         epoch_end_time = time.time()
         print(f'Epoch {epoch_i + 1} Time: {epoch_end_time - epoch_start_time:.2f}s')
 
@@ -279,34 +365,54 @@ def main(args):
         if (epoch_i + 1) % args.eval_interval == 0:
             model.eval()
             val_psnr_meter = AverageMeter()
+            val_masked_psnr = AverageMeter()
             print(f'--- Running Validation for Epoch {epoch_i + 1} ---')
             val_bar = tqdm(test_dataloader,
                            desc=f"[Epoch {epoch_i + 1}/{args.end_epoch}] Val",
                            colour='blue',
-                           ncols=120)
+                           ncols=125)
             
             valid_avg_loss = 0
 
-            for data, gt in val_bar:
-                data = data.to(device, non_blocking=True)
-                gt = gt.to(device, non_blocking=True)
+            for idx, (data, gt) in enumerate(val_bar):
+                data = data.to(device)
+                gt = gt.to(device)
 
                 with torch.no_grad():
                     # Use eval_mask_ratio for evaluation consistency or 0.0 for best reconstruction
                     loss, model_out, _ = model(data, gt, 
                                                unpatch_pred=True, 
                                                mask_ratio=args.eval_mask_ratio)
+                    model_out = (model_out * std_train) + mean_train
+                    gt = (gt * std_train) + mean_train
                     model_out = torch.clamp(model_out, 0., 1.)
+                    if idx == random.randint(0, 280):
+                        out = (model_out.detach().cpu() * 255).type(torch.uint8).squeeze()
+                        gt_out = (gt.detach().cpu() * 255).type(torch.uint8).squeeze()
+                        # breakpoint()
+                        Image.fromarray(out.numpy()).save(os.path.join(save_dir, f'idx{idx}_{epoch_i + 1}.png'))
+                        Image.fromarray(gt_out.numpy()).save(os.path.join(save_dir, f'idx{idx}_gt.png'))
                 
+                val_psnr_masked = calculate_masked_psnr_original_scale(
+                    model_out, 
+                    gt, 
+                    mask, 
+                    model.patchify, 
+                    in_chans=1, 
+                    original_data_range=1.0
+                )
                 valid_avg_loss += loss.cpu().item()
                 psnr_test = batch_PSNR(model_out, gt, 1.0)
                 val_psnr_meter.update(psnr_test.item(), data.size(0))
-                val_bar.set_postfix({"Val PSNR": f"{val_psnr_meter.avg:.2f}"})
+                val_masked_psnr.update(val_psnr_masked.item(), data.size(0))
+                val_bar.set_postfix({"Val PSNR": f"{val_psnr_meter.avg:.4f}",
+                                     "Val PSNR masked": f"{val_masked_psnr.avg:.4f}"})
 
             valid_avg_loss = valid_avg_loss / len(val_bar)
             avg_val_psnr = val_psnr_meter.avg
             print(f"Epoch {epoch_i + 1} Validation Summary: Avg PSNR: {avg_val_psnr:.4f} dB, Avg Loss: {valid_avg_loss:.4f}")
             writer.add_scalar("Val/epoch_avg_psnr", avg_val_psnr, epoch_i + 1)
+            writer.add_scalar('Val/epoch_psnr_masked', val_masked_psnr.avg, epoch_i + 1)
 
             # Save Checkpoint Logic
             is_best = avg_val_psnr > best_psnr
@@ -374,7 +480,7 @@ def parse_args():
     # Environment/Logging Parameters
     parser.add_argument('--save_dir', type=str, default='./mae_model_ckpt_single', help='Directory to save checkpoints and logs')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
-    parser.add_argument('--seed', type=int, default=3407, help='Random seed')
+    parser.add_argument('--seed', type=int, default=1919810, help='Random seed')
     parser.add_argument('--eval_interval', type=int, default=5, help='Evaluate on validation set every N epochs') # Changed from 10
 
     # Resume/Finetune Parameters

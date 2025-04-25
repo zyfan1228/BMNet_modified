@@ -292,13 +292,13 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
 
-    def forward_loss(self, imgs, pred, mask):
+    def forward_loss(self, gt, pred, mask):
         """
-        imgs: [N, in_chan, H, W]
+        gt: [N, in_chan, H, W]
         pred: [N, L, p*p*in_chan]
         mask: [N, L], 0 is keep, 1 is remove, 
         """
-        target = self.patchify(imgs, in_chan=self.in_chan)
+        target = self.patchify(gt, in_chan=self.in_chan)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
@@ -325,8 +325,8 @@ class MaskedAutoencoderViT(nn.Module):
 
 # -- origin mae --
 def mae_vit_base_patch16_dec512d8b(**kwargs):
-    model = MaskedAutoencoderViT(in_chans=1,
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
+    model = MaskedAutoencoderViT(in_chans=3,
+        patch_size=28, embed_dim=768, depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         norm_pix_loss=False, **kwargs)
@@ -354,12 +354,12 @@ def mae_vit_tiny_mine(**kwargs):
     model = MaskedAutoencoderViT(
         in_chans=1,
         patch_size=16,
-        embed_dim=512,      
-        depth=8,            
+        embed_dim=384,      
+        depth=12,            
         num_heads=8,         
-        decoder_embed_dim=384,  
-        decoder_depth=6,     
-        decoder_num_heads=12, 
+        decoder_embed_dim=256,  
+        decoder_depth=8,     
+        decoder_num_heads=8, 
         mlp_ratio=4,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         norm_pix_loss=False,

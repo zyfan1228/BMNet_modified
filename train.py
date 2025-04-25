@@ -137,7 +137,7 @@ def main(args):
     scheduler = CosineLRScheduler(
         optimizer=optimizer,
         t_initial=num_training_steps,
-        lr_min=1e-6,
+        lr_min=1e-5,
         warmup_t=warmup_epochs * len(train_dataloader),
         warmup_lr_init=1e-6,
         warmup_prefix=True,

@@ -22,6 +22,43 @@ from data.dotadataset import DATADataset, MAEDatasetEval
 from model import BMNet, mae_vit_base_patch16, mae_vit_tiny_mine
 
 
+# for sim_v2_gt
+mean_gt = 0.330694
+std_gt = 0.176989
+
+
+def batch_PSNR(img, imclean, data_range):
+    """
+    Calculates the average PSNR across a batch of images using PyTorch.
+    IMPORTANT: Ensure 'img' tensor is clamped to [0, data_range] BEFORE calling this function.
+    """
+    # 确保输入是 Tensor 且形状匹配
+    if not isinstance(img, torch.Tensor) or not isinstance(imclean, torch.Tensor):
+        raise TypeError("Inputs must be torch.Tensor")
+    if img.shape != imclean.shape:
+        raise ValueError(f"Input shapes must match: img {img.shape}, imclean {imclean.shape}")
+
+    # 计算每个像素的平方误差
+    squared_error = (img - imclean) ** 2
+
+    # 计算每张图片的 MSE (在 C, H, W 或 H, W 维度上求平均)
+    if img.ndim == 4: # NCHW
+        mse_per_image = torch.mean(squared_error, dim=(1, 2, 3))
+    elif img.ndim == 3: # NHW
+        mse_per_image = torch.mean(squared_error, dim=(1, 2))
+    else:
+        raise ValueError(f"Unsupported input dimensions: {img.ndim}. Expected 3 or 4.")
+
+    # 避免 log10(0) - 添加一个小的 epsilon
+    # 对于 MSE 接近 0 的情况，PSNR 会非常高
+    epsilon = 1e-10
+    psnr_per_image = 10.0 * torch.log10((data_range**2) / (mse_per_image + epsilon))
+
+    # 计算批次的平均 PSNR
+    average_psnr = torch.mean(psnr_per_image)
+
+    return average_psnr
+
 def eval(args, results_dir):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")
@@ -71,7 +108,9 @@ def eval(args, results_dir):
                                  pin_memory=True)
 
     print('################# Testing ##################')
-    save_idxs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    mean_train = torch.tensor([mean_gt]).view(1, 1, 1, 1).to(device)
+    std_train = torch.tensor([std_gt]).view(1, 1, 1, 1).to(device)
+    save_idxs = [100, 150, 155, 160, 170]
     for idx, (data, gt) in enumerate(tqdm(test_dataloader, ncols=125, colour='green')):
         if idx not in save_idxs:
             continue
@@ -81,9 +120,10 @@ def eval(args, results_dir):
             gt = gt.to(device)
 
             with torch.no_grad():
-                loss, out_test, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.75)
-                test_psnr = 20 * torch.log10(1.0 / torch.sqrt(loss))
-                print(f"{idx} PSNR: {test_psnr:.4f} dB")
+                loss, out_test, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.01)
+                out_test = (out_test * std_train) + mean_train
+                gt = (gt * std_train) + mean_train
+                data = (data * std_train) + mean_train
                 # breakpoint()
         else:
             bs = data.shape[0]
@@ -118,7 +158,7 @@ def eval(args, results_dir):
 
         out_test = torch.clamp(out_test, 0, 1)
 
-        psnr_test = PSNR(out_test, gt, 1.)
+        psnr_test = batch_PSNR(out_test, gt, 1.)
         psnr_avg_meter.update(psnr_test)
         ssim_test = SSIM(out_test, gt, 1.)
         ssim_avg_meter.update(ssim_test)

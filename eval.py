@@ -6,6 +6,7 @@ import datetime
 
 import cv2
 import einops
+from networkx import out_degree_centrality
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
@@ -17,6 +18,7 @@ import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap
 from argparse import ArgumentParser
 
+from train_mae_single import calculate_masked_psnr_original_scale
 from utils import PSNR, SSIM, time2file_name, AverageMeter
 from data.dotadataset import DATADataset, MAEDatasetEval
 from model import BMNet, mae_vit_base_patch16, mae_vit_tiny_mine
@@ -67,6 +69,7 @@ def eval(args, results_dir):
     time_avg_meter = AverageMeter()
     psnr_avg_meter = AverageMeter()
     ssim_avg_meter = AverageMeter()
+    psnr_masked_avg_meter = AverageMeter()
     # show_test = args.num_show
 
     if args.mae:
@@ -110,17 +113,18 @@ def eval(args, results_dir):
     print('################# Testing ##################')
     mean_train = torch.tensor([mean_gt]).view(1, 1, 1, 1).to(device)
     std_train = torch.tensor([std_gt]).view(1, 1, 1, 1).to(device)
-    save_idxs = [100, 150, 155, 160, 170]
+    save_idxs = [7, 14, 21, 28, 35, 42, 49, 56, 63]
     for idx, (data, gt) in enumerate(tqdm(test_dataloader, ncols=125, colour='green')):
-        if idx not in save_idxs:
-            continue
+        # if idx not in save_idxs:
+        #     continue
 
         if args.mae:
             data = data.to(device)
             gt = gt.to(device)
 
             with torch.no_grad():
-                loss, out_test, _ = model(data, gt, unpatch_pred=True, mask_ratio=0.01)
+                _, out_test, mask = model(data, gt, mask_ratio=0.75)
+                out_test = model.unpatchify(out_test, in_chan=data.shape[1])
                 out_test = (out_test * std_train) + mean_train
                 gt = (gt * std_train) + mean_train
                 data = (data * std_train) + mean_train
@@ -158,10 +162,20 @@ def eval(args, results_dir):
 
         out_test = torch.clamp(out_test, 0, 1)
 
-        psnr_test = batch_PSNR(out_test, gt, 1.)
-        psnr_avg_meter.update(psnr_test)
+        psnr_test_full = batch_PSNR(out_test, gt, 1.)
+        psnr_avg_meter.update(psnr_test_full)
         ssim_test = SSIM(out_test, gt, 1.)
         ssim_avg_meter.update(ssim_test)
+
+        psnr_val_masked = calculate_masked_psnr_original_scale(
+            out_test, 
+            gt, 
+            mask, # Pass the validation mask
+            model.patchify, 
+            data.shape[1], 
+            1.0
+        )
+        psnr_masked_avg_meter.update(psnr_val_masked)
 
         if idx in save_idxs:
             save_array(out_test.cpu(), file_path=os.path.join(results_dir, f"output_idx_{idx}.png"))
@@ -169,8 +183,9 @@ def eval(args, results_dir):
             save_array(data.cpu(), file_path=os.path.join(results_dir, f"input_idx_{idx}.png"))
 
     print("test psnr: %.4f" % psnr_avg_meter.avg)
+    print("masked psnr: %.4f" % psnr_masked_avg_meter.avg)
     print("test ssim: %.4f" % ssim_avg_meter.avg)
-    print("avg throughput: %.4f s/image" % time_avg_meter.avg)
+    # print("avg throughput: %.4f s/image" % time_avg_meter.avg)
 
     if args.lm: 
         mask_origin = np.load(os.path.join(args.model_path, "mask_origin.npy"))

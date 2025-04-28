@@ -2,7 +2,7 @@ import os
 import time
 import shutil
 import datetime
-import argparse 
+import argparse
 import random
 
 import torch
@@ -10,290 +10,342 @@ import numpy as np
 from tqdm import tqdm
 import tensorboardX
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader # Import Dataset
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+from timm.models.vision_transformer import PatchEmbed, Block
 from timm.scheduler import CosineLRScheduler
 from PIL import Image
-from skimage.metrics import peak_signal_noise_ratio as ski_psnr
+from functools import partial
 
+# Import your models
 from model import mae_vit_tiny_mine, mae_vit_base_patch16
-from data.dotadataset import MAEDataset, MAEDatasetEval
 
 
-# for sim_v2_gt
-mean_gt = 0.330694
-std_gt = 0.176989
+# Import your specific ImageNet Dataset class
+# (Make sure this definition is available, either imported or defined above main)
+# -- Your MAEImageNetDataset Definition (as provided) --
+# -- for ImageNet-1k --
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]) # ImageNet
 
-# --- Assume these are in separate files or defined here ---
-# from data import MAEDataset, MAEDatasetEval # Or define below
-# from model import mae_vit_tiny_mine, mae_vit_base_patch16 # Or define below
-# from utils import batch_PSNR, time2file_name, AverageMeter # Or define below
-# --- End Assumptions ---
+train_transforms = transforms.Compose([
+    transforms.RandomResizedCrop(224), # Assuming args.img_size is 224, otherwise use args.img_size
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    normalize,
+])
 
-# --- Placeholder for Utilities (if not imported) ---
+# Validation transform usually doesn't use RandomResizedCrop
+valid_transforms = transforms.Compose([
+    transforms.Resize(256), # Standard practice: resize then center crop
+    transforms.CenterCrop(224), # Assuming args.img_size is 224
+    transforms.ToTensor(),
+    normalize,
+])
+
+class MAEImageNetDataset(Dataset):
+    def __init__(self, root, train=True, img_size=224): # Add img_size param
+        self.image_folder = datasets.ImageFolder(root, transform=None)
+        # Define transforms inside __init__ using img_size
+        self.train_transforms = transforms.Compose([
+            transforms.RandomResizedCrop(img_size, 
+                                         scale=(0.2, 1.0), 
+                                         interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        self.valid_transforms = transforms.Compose([
+            transforms.Resize(int(img_size * 256 / 224), 
+                              interpolation=transforms.InterpolationMode.BICUBIC), # Scale resize based on img_size
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        # The transform applied to get the input 'data'
+        self.transform = self.train_transforms if train else self.valid_transforms
+        # The transform applied to get the target 'gt' (usually simpler)
+        # For MAE GT, often just resize/crop + normalize, same as validation transform
+        self.target_transform = self.valid_transforms # Use validation transform for GT
+
+        if not self.image_folder.samples:
+             raise ValueError(f"No images found in {root} or its subdirectories.")
+
+    def __getitem__(self, index):
+        path, _ = self.image_folder.samples[index]
+        try:
+            original_img = self.image_folder.loader(path) # Loads as PIL RGB by default
+        except Exception as e:
+             print(f"Error loading image {path}: {e}")
+             raise RuntimeError(f"Failed to load image {path}") from e
+
+        data = self.transform(original_img)
+        gt = self.target_transform(original_img)
+        return data, gt
+
+    def __len__(self):
+        return len(self.image_folder)
+# -- End MAEImageNetDataset Definition --
+
+
+# Import your custom dataset (ensure it exists and works)
+try:
+    from data.dotadataset import MAEDataset, MAEDatasetEval
+except ImportError:
+    print("Warning: Could not import custom MAEDataset/MAEDatasetEval. Custom dataset functionality will not work.")
+    MAEDataset = None
+    MAEDatasetEval = None
+
+# --- Normalization Constants ---
+CUSTOM_DATASET_MEAN = [0.330694] # Assuming single channel
+CUSTOM_DATASET_STD = [0.176989]
+IMAGENET_DEFAULT_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_DEFAULT_STD = [0.229, 0.224, 0.225]
+ORIGINAL_DATA_RANGE = 1.0 # We de-normalize back to [0, 1] for PSNR/SSIM
+
+# --- Utility Functions (batch_PSNR, AverageMeter, etc.) ---
+# (Keep the definitions of batch_PSNR, calculate_masked_psnr_original_scale,
+#  time2file_name, AverageMeter, save_checkpoint as they were in the previous response)
 def batch_PSNR(img, imclean, data_range):
-    """
-    Calculates the average PSNR across a batch of images using PyTorch.
-    IMPORTANT: Ensure 'img' tensor is clamped to [0, data_range] BEFORE calling this function.
-    """
-    # 确保输入是 Tensor 且形状匹配
-    if not isinstance(img, torch.Tensor) or not isinstance(imclean, torch.Tensor):
-        raise TypeError("Inputs must be torch.Tensor")
-    if img.shape != imclean.shape:
-        raise ValueError(f"Input shapes must match: img {img.shape}, imclean {imclean.shape}")
-
-    # 计算每个像素的平方误差
+    if not isinstance(img, torch.Tensor) or not isinstance(imclean, torch.Tensor): raise TypeError("Inputs must be torch.Tensor")
+    if img.shape != imclean.shape: raise ValueError(f"Input shapes must match: img {img.shape}, imclean {imclean.shape}")
     squared_error = (img - imclean) ** 2
-
-    # 计算每张图片的 MSE (在 C, H, W 或 H, W 维度上求平均)
-    if img.ndim == 4: # NCHW
-        mse_per_image = torch.mean(squared_error, dim=(1, 2, 3))
-    elif img.ndim == 3: # NHW
-        mse_per_image = torch.mean(squared_error, dim=(1, 2))
-    else:
-        raise ValueError(f"Unsupported input dimensions: {img.ndim}. Expected 3 or 4.")
-
-    # 避免 log10(0) - 添加一个小的 epsilon
-    # 对于 MSE 接近 0 的情况，PSNR 会非常高
+    if img.ndim == 4: mse_per_image = torch.mean(squared_error, dim=(1, 2, 3))
+    elif img.ndim == 3: mse_per_image = torch.mean(squared_error, dim=(1, 2))
+    else: raise ValueError(f"Unsupported input dimensions: {img.ndim}. Expected 3 or 4.")
     epsilon = 1e-10
     psnr_per_image = 10.0 * torch.log10((data_range**2) / (mse_per_image + epsilon))
+    return torch.mean(psnr_per_image)
 
-    # 计算批次的平均 PSNR
-    average_psnr = torch.mean(psnr_per_image)
-
-    return average_psnr
-
-@torch.no_grad() 
-def calculate_masked_psnr_original_scale(
-    pred_original_img,    # (N, C, H, W) - De-normalized & Clamped prediction image
-    gt_original_img,      # (N, C, H, W) - De-normalized & Clamped ground truth image
-    mask,                 # (N, L) - Binary mask, 1 is masked
-    patchify_func,        # Callable (e.g., model.patchify)
-    in_chans,             # int
-    original_data_range   # float (e.g., 1.0 or 255.0)
-):
-    
+@torch.no_grad()
+def calculate_masked_psnr_original_scale(pred_original_img, gt_original_img, mask, patchify_func, in_chans, original_data_range):
     device = pred_original_img.device
-
-    # --- 1. Patchify the de-normalized & clamped images ---
-    pred_original_patch = patchify_func(pred_original_img, in_chan=in_chans) # (N, L, P*P*C)
-    target_original_patch = patchify_func(gt_original_img, in_chan=in_chans) # (N, L, P*P*C)
-
-    # --- 2. Calculate PSNR per patch on the original scale ---
+    pred_original_patch = patchify_func(pred_original_img, in_chan=in_chans)
+    target_original_patch = patchify_func(gt_original_img, in_chan=in_chans)
     squared_error_original = (pred_original_patch - target_original_patch) ** 2
-    mse_original_per_patch = torch.mean(squared_error_original, dim=-1) # MSE per patch (N, L)
-
+    mse_original_per_patch = torch.mean(squared_error_original, dim=-1)
     epsilon = 1e-10
     mse_original_per_patch_safe = mse_original_per_patch + epsilon
-    psnr_original_per_patch = 10.0 * torch.log10((original_data_range**2) / mse_original_per_patch_safe) # (N, L)
-
-    # --- 3. Calculate average PSNR only on masked patches ---
+    psnr_original_per_patch = 10.0 * torch.log10((original_data_range**2) / mse_original_per_patch_safe)
     num_masked = mask.sum()
-    if num_masked == 0:
-        return torch.tensor(0.0, device=device) # Or handle as appropriate
-
-    # Ensure mask is on the correct device and type for multiplication
+    if num_masked == 0: return torch.tensor(0.0, device=device)
     mask_float = mask.to(device=psnr_original_per_patch.device, dtype=torch.float32)
-
     masked_psnr_sum = (psnr_original_per_patch * mask_float).sum()
-    average_masked_psnr = masked_psnr_sum / num_masked
+    return masked_psnr_sum / num_masked
 
-    return average_masked_psnr
-
-def time2file_name(time_str):
-    # Basic time formatting (replace with yours)
-    return time_str.replace(" ", "_").replace(":", "-").split('.')[0]
+def time2file_name(time_str): return time_str.replace(" ", "_").replace(":", "-").split('.')[0]
 
 class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
+    def __init__(self): self.reset()
+    def reset(self): self.val, self.avg, self.sum, self.count = 0, 0, 0, 0
     def update(self, val, n=1):
         self.val = val
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-# --- End Placeholder Utilities ---
 
-# --- Placeholder for Model (if not imported) ---
-# IMPORTANT: Make sure the actual model definition in model.py includes the fixes!
-# e.g. from model import mae_vit_tiny_mine, mae_vit_base_patch16
-# Defining a dummy here just for script structure:
-# from model import mae_vit_tiny_mine, mae_vit_base_patch16 # Assuming you have this
-# --- End Placeholder Model ---
+def save_checkpoint(state, is_best, filename='checkpoint.pth'):
+    torch.save(state, filename)
+    if is_best:
+        save_dir = os.path.dirname(filename)
+        best_filename = os.path.join(save_dir, 'model_best.pth')
+        shutil.copyfile(filename, best_filename)
 
 
+# --- Main Training Function ---
 def main(args):
-    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Create Save Directory
+    # --- Setup Save Directory and Logger ---
     date_time = str(datetime.datetime.now())
     date_time = time2file_name(date_time)
-    save_dir = os.path.join(args.save_dir, date_time)
+    dataset_tag = "imagenet" if args.imagenet else "custom"
+    save_dir = os.path.join(args.save_dir, f"{dataset_tag}_{args.model}_{args.patch_size}_{date_time}") # Include patch_size
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created save directory: {save_dir}")
     else:
         print(f"Save directory exists: {save_dir}")
-
-    # TensorBoard Writer
     writer = tensorboardX.SummaryWriter(log_dir=save_dir)
 
-    # Datasets and DataLoaders
-    train_dir = args.data_path
-    # Try to find validation path, default to using train path if not easily replaceable
-    test_dir = train_dir.replace('train', 'valid')
-    # if not os.path.exists(os.path.join(test_dir, 'gt')):
-    #     print(f"Validation path {test_dir} not found, using train path {train_dir} for validation.")
-    #     test_dir = train_dir # Fallback to train data for validation if valid path doesn't exist
+    # --- Determine Dataset Parameters & Load Datasets ---
+    if args.imagenet:
+        print("Using ImageNet-1k Dataset")
+        num_input_channels = 3
+        mean = IMAGENET_DEFAULT_MEAN
+        std = IMAGENET_DEFAULT_STD
 
-    train_dataset = MAEDataset(train_dir,
-                               args.blur,
-                               args.kernel_size,
-                               args.sigma,
-                               img_size=args.img_size) # Pass img_size
-    test_dataset = MAEDatasetEval(test_dir,
-                                  args.blur,
-                                  args.kernel_size,
-                                  args.sigma,
-                                  img_size=args.img_size) # Pass img_size
+        train_dir = os.path.join(args.imagenet_path, 'train')
+        val_dir = os.path.join(args.imagenet_path, 'val')
+        if not os.path.isdir(train_dir) or not os.path.isdir(val_dir):
+             raise FileNotFoundError(f"ImageNet train ({train_dir}) or val ({val_dir}) directory not found under {args.imagenet_path}")
 
-    train_dataloader = DataLoader(train_dataset,
-                                  batch_size=args.batch_size,
-                                  shuffle=True,
+        # Use your MAEImageNetDataset class
+        train_dataset = MAEImageNetDataset(train_dir, train=True, img_size=args.img_size)
+        test_dataset = MAEImageNetDataset(val_dir, train=False, img_size=args.img_size) # Use train=False for validation transforms
+
+    else: # Use Custom Dataset
+        print("Using Custom Dataset")
+        if MAEDataset is None or MAEDatasetEval is None:
+             raise ImportError("Custom dataset classes MAEDataset/MAEDatasetEval could not be imported.")
+
+        num_input_channels = 1 # Assuming custom is single channel
+        mean = CUSTOM_DATASET_MEAN
+        std = CUSTOM_DATASET_STD
+
+        try:
+            # Assumes MAEDataset/Eval takes transform/target_transform
+            # You NEED to modify your MAEDataset to accept and use these transforms!
+            train_dataset = MAEDataset(args.data_path, 
+                                       args.blur, 
+                                       args.kernel_size, 
+                                       args.sigma,
+                                       img_size=args.img_size)
+
+            val_data_path = args.data_path.replace('train', 'valid')
+            if not os.path.isdir(val_data_path):
+                 print(f"Validation path {val_data_path} not found, using train path for validation.")
+                 val_data_path = args.data_path
+            # Assumes MAEDatasetEval takes transform applied to both data & gt
+            test_dataset = MAEDatasetEval(val_data_path, 
+                                          args.blur, 
+                                          args.kernel_size, 
+                                          args.sigma,
+                                          img_size=args.img_size)
+        except TypeError as e:
+             print("\nERROR: Failed to initialize custom Datasets.")
+             print("Please ensure MAEDataset/MAEDatasetEval accept 'transform'/'target_transform' arguments")
+             print("and apply them (including ToTensor and Normalize) internally.")
+             print(f"Original error: {e}")
+             return
+
+    # --- Create DataLoaders (Same logic) ---
+    train_dataloader = DataLoader(train_dataset, 
+                                  batch_size=args.batch_size, 
+                                  shuffle=True, 
                                   drop_last=True,
-                                  pin_memory=True,
+                                  pin_memory=True, 
                                   num_workers=args.num_workers,
                                   persistent_workers=True if args.num_workers > 0 else False)
-    test_dataloader = DataLoader(test_dataset,
-                                 batch_size=args.eval_batch_size, # Use separate batch size for eval
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=args.eval_batch_size, 
                                  shuffle=False,
-                                 num_workers=args.num_workers,
+                                 num_workers=args.num_workers, 
                                  pin_memory=True)
-    print(f"Train Dataloader: {len(train_dataloader)} batches")
-    print(f"Test Dataloader: {len(test_dataloader)} batches")
+    print(f"Train Dataloader: {len(train_dataloader)} batches ({len(train_dataset)} samples)")
+    print(f"Test Dataloader: {len(test_dataloader)} batches ({len(test_dataset)} samples)")
 
 
-    # Model Definition
-    print(f"Loading MAE model: {args.model}")
+    # --- Model Definition ---
+    print(f"Loading MAE model: {args.model}, Patch Size: {args.patch_size}, Input Channels: {num_input_channels}")
+    # Pass patch_size and in_chans to model constructor
+    # Ensure your model functions use these arguments!
+    model_args = {'patch_size': args.patch_size, 'in_chans': num_input_channels}
     if args.model == 'tiny':
-        model = mae_vit_tiny_mine() # Ensure this uses in_chans=1 and norm_pix_loss=False
+        # Example: Assuming mae_vit_tiny_mine accepts these args
+        model = mae_vit_tiny_mine()
     elif args.model == 'base':
-         # WARNING: ViT-Base is likely too large for 1300 images!
-        print("WARNING: Using mae_vit_base_patch16, which is likely too large for the dataset.")
-        model = mae_vit_base_patch16() # Ensure this uses in_chans=1 and norm_pix_loss=False
+        # Example: Assuming mae_vit_base_patch16 accepts these args
+        model = mae_vit_base_patch16()
     else:
         raise ValueError(f"Unknown model type: {args.model}")
 
-    # --- CRITICAL FIX REMINDER ---
-    print("Reminder: Ensure the MaskedAutoencoderViT class in model.py has the fix:")
-    print("  1. `forward_loss` uses `gt` (clean image) to compute the target.")
-    print("  2. `forward_loss` has divide-by-zero protection for `mask.sum()`.")
-    # ---
+    # Remove Sigmoid if exists (Keep this check)
+    if isinstance(model.decoder_pred, nn.Sequential) and isinstance(model.decoder_pred[-1], nn.Sigmoid):
+        print("Removing Sigmoid layer from decoder_pred.")
+        model.decoder_pred = model.decoder_pred[:-1]
 
     model.to(device)
+    print(f"Number of trainable params (M): {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1.e6:.2f}")
 
-    # Print model parameter count
-    tot_grad_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'Number of trainable params (M): {tot_grad_params / 1.e6:.2f}')
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(),
-                                  lr=args.learning_rate * args.batch_size / 64,
-                                  weight_decay=args.weight_decay,
+    # --- Optimizer ---
+    # Apply LR scaling based on a reference batch size (e.g., 256 or 512 for ImageNet MAE)
+    # linear scaling rule: lr = base_lr * total_batch_size / ref_batch_size
+    ref_batch_size = 64 # Common reference for scaling
+    effective_lr = args.learning_rate * args.batch_size / ref_batch_size
+    print(f"Base LR: {args.learning_rate}, Ref BS: {ref_batch_size}, Actual BS: {args.batch_size}")
+    print(f"Applying LR Scaling: Effective LR = {args.learning_rate} * {args.batch_size} / {ref_batch_size} = {effective_lr:.2e}")
+
+    optimizer = torch.optim.AdamW(model.parameters(), 
+                                  lr=effective_lr, # Use scaled LR
+                                  weight_decay=args.weight_decay, 
                                   betas=(0.9, 0.95))
-    print(f"Optimizer: AdamW, LR: {args.learning_rate}, Weight Decay: {args.weight_decay}")
+    print(f"Optimizer: AdamW, LR: {effective_lr:.2e}, Weight Decay: {args.weight_decay}")
 
 
-    # LR Scheduler
+    # --- LR Scheduler (Keep as is) ---
     num_training_steps = args.end_epoch * len(train_dataloader)
     warmup_steps = args.warmup_epochs * len(train_dataloader)
     print(f"Total training steps: {num_training_steps}")
     print(f"Warmup steps: {warmup_steps} ({args.warmup_epochs} epochs)")
     scheduler = CosineLRScheduler(
-        optimizer=optimizer,
-        t_initial=num_training_steps,
-        lr_min=1e-5,  # Keep lr_min relatively standard
-        warmup_t=warmup_steps,
-        warmup_lr_init=1e-6, # Start warmup from a low value
+        optimizer=optimizer, 
+        t_initial=num_training_steps, 
+        lr_min=5e-5,
+        warmup_t=warmup_steps, 
+        warmup_lr_init=1e-6, 
         warmup_prefix=True,
-        cycle_decay=1.0, # Standard decay for cosine cycle, 1 means no decay within cycle
-        t_in_epochs=False # Step based on iterations
+        cycle_decay=1.0, 
+        t_in_epochs=False
     )
 
-    # Resume / Finetune (Simplified for single GPU)
+    # --- Resume / Finetune (Keep as is, uses 'best_val_masked_psnr') ---
     start_epoch = args.start_epoch
-    best_psnr = 0.
+    best_val_masked_psnr = 0. # Track best validation masked PSNR
     if args.resume:
         if os.path.isfile(args.resume):
             print(f"=> loading checkpoint '{args.resume}'")
-            # Load checkpoint to CPU first to avoid GPU memory issues
             checkpoint = torch.load(args.resume, map_location='cpu')
-            # Basic state dict loading, remove 'module.' prefix if saved from DDP
             state_dict = checkpoint['state_dict']
             new_state_dict = {}
-            for k, v in state_dict.items():
-                name = k[7:] if k.startswith('module.') else k # remove `module.`
-                new_state_dict[name] = v
-            model.load_state_dict(new_state_dict, strict=False) # Allow non-strict loading
-
-            # Load optimizer and scheduler state if available
-            if 'optimizer' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer'])
-            if 'scheduler' in checkpoint and isinstance(scheduler, CosineLRScheduler): # Check type if needed
-                 scheduler.load_state_dict(checkpoint['scheduler']) # Load scheduler state too
-            if 'epoch' in checkpoint:
-                 start_epoch = checkpoint['epoch'] + 1 # Start from next epoch
-                 print(f"   Resuming from epoch {start_epoch}")
-            if 'best_psnr' in checkpoint:
-                 best_psnr = checkpoint['best_psnr']
-                 print(f"   Previous best PSNR: {best_psnr:.4f}")
-        else:
-            print(f"=> no checkpoint found at '{args.resume}'")
-            start_epoch = 0 # Start from scratch if resume path invalid
-    elif args.finetune: # Basic finetune (load weights only)
+            for k, v in state_dict.items(): name = k[7:] if k.startswith('module.') else k; new_state_dict[name] = v
+            msg = model.load_state_dict(new_state_dict, strict=False); print(f"   Model loaded with status: {msg}")
+            if 'optimizer' in checkpoint and not args.finetune:
+                try: optimizer.load_state_dict(checkpoint['optimizer']); print("   Optimizer state loaded.")
+                except ValueError as e: print(f"   Warning: Could not load optimizer state: {e}")
+            if 'scheduler' in checkpoint and not args.finetune:
+                 try: scheduler.load_state_dict(checkpoint['scheduler']); print("   Scheduler state loaded.")
+                 except Exception as e: print(f"   Warning: Could not load scheduler state: {e}")
+            if 'epoch' in checkpoint and not args.finetune:
+                 start_epoch = checkpoint['epoch'] + 1; print(f"   Resuming from epoch {start_epoch}")
+            if 'best_val_masked_psnr' in checkpoint: best_val_masked_psnr = checkpoint['best_val_masked_psnr']; print(f"   Previous best validation masked PSNR: {best_val_masked_psnr:.4f}")
+            elif 'best_psnr' in checkpoint: best_val_masked_psnr = checkpoint['best_psnr']; print(f"   Loaded previous best (likely full) PSNR: {best_val_masked_psnr:.4f}")
+        else: print(f"=> no checkpoint found at '{args.resume}'")
+    elif args.finetune:
          if os.path.isfile(args.finetune):
             print(f"=> loading weights for finetuning '{args.finetune}'")
             checkpoint = torch.load(args.finetune, map_location='cpu')
-            state_dict = checkpoint['state_dict']
+            if 'state_dict' in checkpoint: state_dict = checkpoint['state_dict']
+            elif 'model' in checkpoint: state_dict = checkpoint['model']
+            else: state_dict = checkpoint
             new_state_dict = {}
-            for k, v in state_dict.items():
-                name = k[7:] if k.startswith('module.') else k
-                new_state_dict[name] = v
-            msg = model.load_state_dict(new_state_dict, strict=False)
-            print(f"   Weights loaded with status: {msg}")
-            start_epoch = 0 # Start training from epoch 0 for finetuning
-         else:
-             print(f"=> no weights found at '{args.finetune}'")
-             start_epoch = 0
+            for k, v in state_dict.items(): name = k[7:] if k.startswith('module.') else k; new_state_dict[name] = v
+            msg = model.load_state_dict(new_state_dict, strict=False); print(f"   Weights loaded with status: {msg}")
+            start_epoch = 0
+         else: print(f"=> no weights found at '{args.finetune}'")
 
-    mean_train = torch.tensor([mean_gt]).view(1, 1, 1, 1).to(device)
-    std_train = torch.tensor([std_gt]).view(1, 1, 1, 1).to(device)
-    # Training Loop
+
+    # --- Prepare mean/std tensors (Keep as is) ---
+    mean_tensor = torch.tensor(mean, device=device).view(1, num_input_channels, 1, 1)
+    std_tensor = torch.tensor(std, device=device).view(1, num_input_channels, 1, 1)
+
+
+    # --- Training Loop (Keep mostly as is, uses correct de-normalization) ---
     print(f"Starting training from epoch {start_epoch + 1} to {args.end_epoch}")
     for epoch_i in range(start_epoch, args.end_epoch):
         model.train()
         epoch_loss_meter = AverageMeter()
-        epoch_psnr_meter = AverageMeter()
-        epoch_masked_psnr = AverageMeter()
+        epoch_train_psnr_full = AverageMeter()
+        epoch_train_psnr_masked = AverageMeter()
         epoch_start_time = time.time()
 
         lr = optimizer.param_groups[0]['lr']
-        print(f"\nEpoch {epoch_i + 1}/{args.end_epoch} - LR: {lr:.2e}")
-        writer.add_scalar('lr', lr, epoch_i + 1)
+        writer.add_scalar('lr', lr, current_iter if 'current_iter' in locals() else epoch_i * len(train_dataloader)) # Log LR
 
-        training_bar = tqdm(train_dataloader,
-                            desc=f"[Epoch {epoch_i + 1}/{args.end_epoch}] Train",
-                            colour='yellow',
-                            ncols=125) # Adjust ncols as needed
+        training_bar = tqdm(train_dataloader, desc=f"[Epoch {epoch_i + 1}/{args.end_epoch}] Train", colour='yellow', ncols=125)
 
         for idx, (data, gt) in enumerate(training_bar):
             current_iter = epoch_i * len(train_dataloader) + idx
@@ -302,207 +354,181 @@ def main(args):
 
             optimizer.zero_grad()
 
-            # --- Model Forward ---
-            # Ensure your model's forward method handles unpatch_pred=True correctly
-            # and that the loss calculation uses 'gt' as the target (FIXED IN MODEL FILE)
-            loss, out_train, mask = model(data, gt, unpatch_pred=True, mask_ratio=args.mask_ratio)
-            out_train = (out_train * std_train) + mean_train
-            gt = (gt * std_train) + mean_train
-            
+            loss, pred_patches, mask = model(data, 
+                                             gt=gt, 
+                                             mask_ratio=args.mask_ratio)
+
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"ERROR: NaN or Inf loss detected at epoch {epoch_i+1}, iter {idx}. Skipping batch.")
-                # Consider logging more info or stopping training
-                continue # Skip this batch
+                continue
 
             loss.backward()
-            # Optional: Gradient Clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 
-                                           max_norm=1.0, 
-                                           error_if_nonfinite=True)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-
-            # Step the scheduler after each iteration
             scheduler.step_update(current_iter)
 
-            # Clamp output for PSNR calculation
-            out_train = torch.clamp(out_train, 0., 1.)
-            psnr_train = batch_PSNR(out_train, gt, 1.0) # data_range is 1.0 for [0,1]
-            psnr_masked = calculate_masked_psnr_original_scale(
-                out_train, 
-                gt, 
-                mask, 
-                model.patchify, 
-                in_chans=1, 
-                original_data_range=1.0
-            )
+            with torch.no_grad():
+                gt_original = gt * std_tensor + mean_tensor
+                gt_original_clamped = torch.clamp(gt_original, 0., ORIGINAL_DATA_RANGE)
 
-            epoch_loss_meter.update(loss.item(), data.size(0))
-            epoch_psnr_meter.update(psnr_train.item(), data.size(0))
-            epoch_masked_psnr.update(psnr_masked.item(), data.size(0))
+                pred_img_standardized = model.unpatchify(pred_patches, in_chan=num_input_channels)
+                pred_original = pred_img_standardized * std_tensor + mean_tensor
+                pred_original_clamped = torch.clamp(pred_original, 0., ORIGINAL_DATA_RANGE)
 
-            # Logging to tqdm
+                psnr_train_full = batch_PSNR(pred_original_clamped, 
+                                             gt_original_clamped, 
+                                             ORIGINAL_DATA_RANGE)
+                psnr_train_masked = calculate_masked_psnr_original_scale(
+                    pred_original_clamped, 
+                    gt_original_clamped, mask,
+                    model.patchify, 
+                    num_input_channels, 
+                    ORIGINAL_DATA_RANGE
+                )
+
+            batch_size = data.size(0)
+            epoch_loss_meter.update(loss.item(), batch_size)
+            epoch_train_psnr_full.update(psnr_train_full.item(), batch_size)
+            epoch_train_psnr_masked.update(psnr_train_masked.item(), batch_size)
+
             training_bar.set_postfix({
                 "Loss": f"{epoch_loss_meter.avg:.4f}",
-                "PSNR": f"{epoch_psnr_meter.avg:.4f}",
-                "PSNR masked": f"{epoch_masked_psnr.avg:.4f}"
-            })
-
-            # Logging to TensorBoard (maybe less frequently)
-            if current_iter % 50 == 0: # Log every 50 iterations
+                "Tr PSNR Full": f"{epoch_train_psnr_full.avg:.2f}",
+                "Tr PSNR Mask": f"{epoch_train_psnr_masked.avg:.2f}" })
+            if current_iter % 100 == 0:
                  writer.add_scalar('Train/iter_loss', loss.item(), current_iter)
-                 writer.add_scalar('Train/iter_psnr', psnr_train.item(), current_iter)
+                 writer.add_scalar('Train/iter_psnr_full', psnr_train_full.item(), current_iter)
+                 writer.add_scalar('Train/iter_psnr_masked', psnr_train_masked.item(), current_iter)
 
-
-        print(f"Epoch {epoch_i + 1} Train Summary: Avg Loss: {epoch_loss_meter.avg:.4f}, Avg PSNR: {epoch_psnr_meter.avg:.4f} dB")
+        print(f"Epoch {epoch_i + 1} Train Summary: Loss: {epoch_loss_meter.avg:.4f}, "
+              f"PSNR Full: {epoch_train_psnr_full.avg:.2f} dB, PSNR Masked: {epoch_train_psnr_masked.avg:.2f} dB")
         writer.add_scalar('Train/epoch_avg_loss', epoch_loss_meter.avg, epoch_i + 1)
-        writer.add_scalar('Train/epoch_avg_psnr', epoch_psnr_meter.avg, epoch_i + 1)
-        writer.add_scalar('Train/epoch_psnr_masked', epoch_masked_psnr.avg, epoch_i + 1)
-        epoch_end_time = time.time()
-        print(f'Epoch {epoch_i + 1} Time: {epoch_end_time - epoch_start_time:.2f}s')
+        writer.add_scalar('Train/epoch_avg_psnr_full', epoch_train_psnr_full.avg, epoch_i + 1)
+        writer.add_scalar('Train/epoch_avg_psnr_masked', epoch_train_psnr_masked.avg, epoch_i + 1)
+        epoch_end_time = time.time(); print(f'Epoch {epoch_i + 1} Time: {epoch_end_time - epoch_start_time:.2f}s')
 
-
-        # Evaluation (run every 'eval_interval' epochs)
+        # --- Evaluation (Keep as is, uses correct de-normalization & masked PSNR) ---
         if (epoch_i + 1) % args.eval_interval == 0:
             model.eval()
-            val_psnr_meter = AverageMeter()
-            val_masked_psnr = AverageMeter()
-            print(f'--- Running Validation for Epoch {epoch_i + 1} ---')
-            val_bar = tqdm(test_dataloader,
-                           desc=f"[Epoch {epoch_i + 1}/{args.end_epoch}] Val",
-                           colour='blue',
-                           ncols=125)
-            
-            valid_avg_loss = 0
+            val_loss_meter = AverageMeter()
+            val_psnr_full = AverageMeter()
+            val_psnr_masked = AverageMeter()
+            print(f'--- Validation Epoch {epoch_i + 1} ---')
+            val_bar = tqdm(test_dataloader, desc=f" Val", colour='blue', ncols=125)
+            visible_batch_idx = random.randint(0, len(test_dataloader) - 1)
 
             for idx, (data, gt) in enumerate(val_bar):
-                data = data.to(device)
-                gt = gt.to(device)
-
+                data = data.to(device, non_blocking=True)
+                gt = gt.to(device, non_blocking=True)
                 with torch.no_grad():
-                    # Use eval_mask_ratio for evaluation consistency or 0.0 for best reconstruction
-                    loss, model_out, _ = model(data, gt, 
-                                               unpatch_pred=True, 
-                                               mask_ratio=args.eval_mask_ratio)
-                    model_out = (model_out * std_train) + mean_train
-                    gt = (gt * std_train) + mean_train
-                    model_out = torch.clamp(model_out, 0., 1.)
-                    if idx == random.randint(0, 280):
-                        out = (model_out.detach().cpu() * 255).type(torch.uint8).squeeze()
-                        gt_out = (gt.detach().cpu() * 255).type(torch.uint8).squeeze()
-                        # breakpoint()
-                        Image.fromarray(out.numpy()).save(os.path.join(save_dir, f'idx{idx}_{epoch_i + 1}.png'))
-                        Image.fromarray(gt_out.numpy()).save(os.path.join(save_dir, f'idx{idx}_gt.png'))
-                
-                val_psnr_masked = calculate_masked_psnr_original_scale(
-                    model_out, 
-                    gt, 
-                    mask, 
-                    model.patchify, 
-                    in_chans=1, 
-                    original_data_range=1.0
-                )
-                valid_avg_loss += loss.cpu().item()
-                psnr_test = batch_PSNR(model_out, gt, 1.0)
-                val_psnr_meter.update(psnr_test.item(), data.size(0))
-                val_masked_psnr.update(val_psnr_masked.item(), data.size(0))
-                val_bar.set_postfix({"Val PSNR": f"{val_psnr_meter.avg:.4f}",
-                                     "Val PSNR masked": f"{val_masked_psnr.avg:.4f}"})
+                    loss, pred_patches, mask = model(data, gt=gt, mask_ratio=args.eval_mask_ratio) # Get mask here too
+                    gt_original = gt * std_tensor + mean_tensor
+                    gt_original_clamped = torch.clamp(gt_original, 0., ORIGINAL_DATA_RANGE)
+                    pred_img_standardized = model.unpatchify(pred_patches, in_chan=num_input_channels)
+                    pred_original = pred_img_standardized * std_tensor + mean_tensor
+                    pred_original_clamped = torch.clamp(pred_original, 0., ORIGINAL_DATA_RANGE)
 
-            valid_avg_loss = valid_avg_loss / len(val_bar)
-            avg_val_psnr = val_psnr_meter.avg
-            print(f"Epoch {epoch_i + 1} Validation Summary: Avg PSNR: {avg_val_psnr:.4f} dB, Avg Loss: {valid_avg_loss:.4f}")
-            writer.add_scalar("Val/epoch_avg_psnr", avg_val_psnr, epoch_i + 1)
-            writer.add_scalar('Val/epoch_psnr_masked', val_masked_psnr.avg, epoch_i + 1)
+                    psnr_val_full = batch_PSNR(pred_original_clamped, 
+                                               gt_original_clamped, 
+                                               ORIGINAL_DATA_RANGE)
+                    # Pass the mask obtained from validation forward pass
+                    psnr_val_masked = calculate_masked_psnr_original_scale(
+                        pred_original_clamped, 
+                        gt_original_clamped, 
+                        mask, # Pass the validation mask
+                        model.patchify, 
+                        num_input_channels, 
+                        ORIGINAL_DATA_RANGE
+                    )
 
-            # Save Checkpoint Logic
-            is_best = avg_val_psnr > best_psnr
+                    if idx == visible_batch_idx: # Save images logic (keep as is)
+                        img_to_save = (pred_original_clamped[0].detach().cpu() * 255).byte()
+                        gt_to_save = (gt_original_clamped[0].detach().cpu() * 255).byte()
+                        if num_input_channels == 1:
+                            img_pil = Image.fromarray(img_to_save.squeeze().numpy(), mode='L')
+                            gt_pil = Image.fromarray(gt_to_save.squeeze().numpy(), mode='L')
+                        else:
+                            img_pil = Image.fromarray(img_to_save.permute(1, 2, 0).numpy(), mode='RGB')
+                            gt_pil = Image.fromarray(gt_to_save.permute(1, 2, 0).numpy(), mode='RGB')
+                        img_pil.save(os.path.join(save_dir, f'{epoch_i + 1}_pred.png'))
+                        gt_pil.save(os.path.join(save_dir, f'{epoch_i + 1}_gt.png'))
+
+                batch_size = data.size(0)
+                val_loss_meter.update(loss.item(), batch_size)
+                val_psnr_full.update(psnr_val_full.item(), batch_size)
+                val_psnr_masked.update(psnr_val_masked.item(), batch_size)
+                val_bar.set_postfix({ "Loss": f"{val_loss_meter.avg:.4f}", "PSNR Full": f"{val_psnr_full.avg:.2f}", "PSNR Mask": f"{val_psnr_masked.avg:.2f}"})
+
+            avg_val_loss = val_loss_meter.avg
+            avg_val_psnr_full = val_psnr_full.avg
+            avg_val_psnr_masked = val_psnr_masked.avg
+            print(f"Epoch {epoch_i + 1} Validation Summary: Loss: {avg_val_loss:.4f}, "
+                  f"PSNR Full: {avg_val_psnr_full:.2f} dB, PSNR Masked: {avg_val_psnr_masked:.2f} dB")
+            writer.add_scalar("Val/epoch_avg_loss", avg_val_loss, epoch_i + 1)
+            writer.add_scalar("Val/epoch_avg_psnr_full", avg_val_psnr_full, epoch_i + 1)
+            writer.add_scalar("Val/epoch_avg_psnr_masked", avg_val_psnr_masked, epoch_i + 1)
+
+            # --- Save Checkpoint Logic (Based on Val Masked PSNR) ---
+            is_best = avg_val_psnr_masked > best_val_masked_psnr
             if is_best:
-                best_psnr = avg_val_psnr
-                print(f"*** New Best PSNR: {best_psnr:.4f} ***")
-
-            save_dict = {
-                'epoch': epoch_i,
-                'state_dict': model.state_dict(), # No need for module. prefix on single GPU
-                'best_psnr': best_psnr,
-                # 'optimizer': optimizer.state_dict(),
-                # 'scheduler': scheduler.state_dict(), # Save scheduler state
-                'args': args # Save args for reference
-            }
+                best_val_masked_psnr = avg_val_psnr_masked
+                print(f"*** New Best Val Masked PSNR: {best_val_masked_psnr:.4f} ***")
+            save_dict = { 'epoch': epoch_i, 'state_dict': model.state_dict(), 'best_val_masked_psnr': best_val_masked_psnr,
+                          'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'args': args }
             filename = os.path.join(save_dir, f'checkpoint_epoch_{epoch_i + 1}.pth')
             save_checkpoint(save_dict, is_best, filename=filename)
-            print(f"Checkpoint saved to {filename}")
-            if is_best:
-                 print(f"Best model checkpoint updated in {save_dir}/model_best.pth")
+            if is_best: 
+                print(f"Best model updated: {os.path.join(save_dir, 'model_best.pth')}")
 
-    print(f"Training finished. Best Validation PSNR: {best_psnr:.4f}")
+    print(f"Training finished. Best Validation Masked PSNR: {best_val_masked_psnr:.4f}")
     writer.close()
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth'):
-    """Saves checkpoint, and optionally creates/updates 'model_best.pth'"""
-    torch.save(state, filename)
-    if is_best:
-        # Get the directory of the filename
-        save_dir = os.path.dirname(filename)
-        best_filename = os.path.join(save_dir, 'model_best.pth')
-        shutil.copyfile(filename, best_filename)
-
-
+# --- Argument Parser (Keep as is) ---
 def parse_args():
     parser = argparse.ArgumentParser(description='MAE Training on Single GPU')
-
-    # Data Parameters
-    parser.add_argument('--data_path', type=str, required=True,
-                        help='Path to the training data directory (containing a "gt" subfolder)')
-    parser.add_argument('--img_size', type=int, default=224, help='Image size for resizing/cropping')
-
-    # MAE Specific Data Parameters (Dataset related)
-    parser.add_argument('--blur', action='store_true', help='Apply Gaussian blur to input images')
-    parser.add_argument('--kernel_size', type=int, default=3, help='Gaussian kernel size if --blur')
-    parser.add_argument('--sigma', type=float, default=1.0, help='Gaussian sigma if --blur')
-
-    # Model Parameters
-    parser.add_argument('--model', type=str, default='tiny', choices=['tiny', 'base'],
-                        help="MAE model size ('tiny' or 'base')")
-    parser.add_argument('--mask_ratio', type=float, default=0.6, help='Masking ratio for training')
-    parser.add_argument('--eval_mask_ratio', type=float, default=0.0,
-                        help='Masking ratio for evaluation (0.0 for best reconstruction)')
-
-    # Training Parameters
-    parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
-    parser.add_argument('--eval_batch_size', type=int, default=1, help='Evaluation batch size')
-    parser.add_argument('--start_epoch', type=int, default=0, help='Start epoch (for resuming)')
-    parser.add_argument('--end_epoch', type=int, default=500, help='Total number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Initial learning rate for AdamW')
-    parser.add_argument('--weight_decay', type=float, default=0.1, help='Weight decay for AdamW') # Adjusted default
-    parser.add_argument('--warmup_epochs', type=int, default=10, help='Number of warmup epochs')
-
-    # Environment/Logging Parameters
-    parser.add_argument('--save_dir', type=str, default='./mae_model_ckpt_single', help='Directory to save checkpoints and logs')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
-    parser.add_argument('--seed', type=int, default=1919810, help='Random seed')
-    parser.add_argument('--eval_interval', type=int, default=5, help='Evaluate on validation set every N epochs') # Changed from 10
-
-    # Resume/Finetune Parameters
-    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training from')
-    parser.add_argument('--finetune', type=str, default=None, help='Path to weights to start finetuning from (loads weights only)')
-
-
+    parser.add_argument('--imagenet', action='store_true', help='Use ImageNet-1k dataset.')
+    parser.add_argument('--data_path', type=str, default=None, help='Path to custom training data directory.')
+    parser.add_argument('--imagenet_path', type=str, default=None, help='Path to ImageNet-1k root directory.')
+    parser.add_argument('--img_size', type=int, default=224, help='Image size')
+    parser.add_argument('--blur', action='store_true', help='Apply Gaussian blur (custom dataset only)')
+    parser.add_argument('--kernel_size', type=int, default=3, help='Gaussian kernel size (custom dataset only)')
+    parser.add_argument('--sigma', type=float, default=1.0, help='Gaussian sigma (custom dataset only)')
+    parser.add_argument('--model', type=str, default='tiny', choices=['tiny', 'base'], help='MAE model size')
+    parser.add_argument('--patch_size', type=int, default=16, help='Patch size')
+    parser.add_argument('--mask_ratio', type=float, default=0.75, help='Masking ratio for training')
+    parser.add_argument('--eval_mask_ratio', type=float, default=0.0, help='Masking ratio for evaluation')
+    parser.add_argument('--batch_size', type=int, default=64, help='Training batch size')
+    parser.add_argument('--eval_batch_size', type=int, default=64, help='Evaluation batch size')
+    parser.add_argument('--start_epoch', type=int, default=0, help='Start epoch')
+    parser.add_argument('--end_epoch', type=int, default=400, help='Total number of epochs')
+    parser.add_argument('--learning_rate', type=float, default=1.5e-4, help='Base learning rate (scaled in script)')
+    parser.add_argument('--weight_decay', type=float, default=0.05, help='Weight decay')
+    parser.add_argument('--warmup_epochs', type=int, default=40, help='Warmup epochs')
+    parser.add_argument('--save_dir', type=str, default='./mae_checkpoints', help='Save directory')
+    parser.add_argument('--num_workers', type=int, default=8, help='Data loading workers')
+    parser.add_argument('--seed', type=int, default=114514, help='Random seed')
+    parser.add_argument('--eval_interval', type=int, default=10, help='Evaluation interval')
+    parser.add_argument('--resume', type=str, default=None, help='Resume checkpoint path')
+    parser.add_argument('--finetune', type=str, default=None, help='Finetune weights path')
     args = parser.parse_args()
+    if args.imagenet:
+        if args.imagenet_path is None: parser.error("--imagenet requires --imagenet_path.")
+    else:
+        if args.data_path is None: parser.error("Custom dataset requires --data_path.")
     return args
 
 if __name__ == "__main__":
     args = parse_args()
 
-    # Set Seed
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed) # if use multi-GPU (but this script is for single)
-    np.random.seed(args.seed)
-    # random.seed(args.seed) # If using python random
+    seed = args.seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
-    # Optional: Set deterministic behavior (can slow down training)
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
+    # Consider setting deterministic False for speed unless strict reproducibility is needed
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     main(args)

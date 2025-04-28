@@ -326,7 +326,7 @@ class MaskedAutoencoderViT(nn.Module):
 # -- origin mae --
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(in_chans=3,
-        patch_size=28, embed_dim=768, depth=12, num_heads=12,
+        patch_size=16, embed_dim=768, depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         norm_pix_loss=False, **kwargs)
@@ -350,16 +350,17 @@ def mae_vit_huge_patch14_dec512d8b(**kwargs):
         norm_pix_loss=False, **kwargs)
     return model
 
+# -- mine --
 def mae_vit_tiny_mine(**kwargs):
     model = MaskedAutoencoderViT(
         in_chans=1,
         patch_size=16,
         embed_dim=384,      
-        depth=12,            
-        num_heads=8,         
+        depth=8,            
+        num_heads=6,         
         decoder_embed_dim=256,  
-        decoder_depth=8,     
-        decoder_num_heads=8, 
+        decoder_depth=6,     
+        decoder_num_heads=4, 
         mlp_ratio=4,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         norm_pix_loss=False,

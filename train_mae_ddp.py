@@ -747,7 +747,7 @@ def parse_args():
     parser.add_argument('--warmup_epochs', type=int, default=40, help='Warmup epochs')
     parser.add_argument('--save_dir', type=str, default='./mae_checkpoints_ddp', help='Save directory') # Changed default slightly
     parser.add_argument('--num_workers', type=int, default=8, help='Data loading workers per GPU') # Clarified help text
-    parser.add_argument('--seed', type=int, default=114514, help='Random seed')
+    parser.add_argument('--seed', type=int, default=3407, help='Random seed')
     parser.add_argument('--eval_interval', type=int, default=10, help='Evaluation interval (in epochs)')
     parser.add_argument('--resume', type=str, default=None, help='Resume checkpoint path')
     parser.add_argument('--finetune', type=str, default=None, help='Finetune weights path')

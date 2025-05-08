@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as F
 from timm.models.vision_transformer import PatchEmbed, Block
 from timm.scheduler import CosineLRScheduler
 from PIL import Image
@@ -33,62 +34,133 @@ from model import mae_vit_tiny_mine, mae_vit_base_patch16
 
 # -- Your MAEImageNetDataset Definition (Keep as is) --
 # ... (MAEImageNetDataset class definition remains exactly the same) ...
-class MAEImageNetDataset(Dataset):
-    def __init__(self, root, train=True, img_size=224): # Add img_size param
-        self.image_folder = datasets.ImageFolder(root, transform=None)
-        # Define transforms inside __init__ using img_size
-        self.train_transforms = transforms.Compose([
-            transforms.RandomResizedCrop(img_size,
-                                         scale=(0.2, 1.0),
-                                         interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        self.valid_transforms = transforms.Compose([
-            transforms.Resize(int(img_size * 256 / 224),
-                              interpolation=transforms.InterpolationMode.BICUBIC), # Scale resize based on img_size
-            transforms.CenterCrop(img_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        # The transform applied to get the input 'data'
-        self.transform = self.train_transforms if train else self.valid_transforms
-        # The transform applied to get the target 'gt' (usually simpler)
-        # For MAE GT, often just resize/crop + normalize, same as validation transform
-        self.target_transform = self.valid_transforms # Use validation transform for GT
+# Helper function to check if code is running in the main process (useful for DDP)
+def is_main_process():
+    # Simple check, might need adjustment based on your DDP setup
+    # (e.g., using torch.distributed.get_rank() == 0 if initialized)
+    import torch.distributed as dist
+    return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
 
-        # Check only on rank 0 to avoid multiple prints
-        # Defer the check until after potential DDP initialization or handle gracefully
-        # if is_main_process() and not self.image_folder.samples:
-        #      print(f"Warning: No images found in {root} or its subdirectories (checked on rank 0).")
-             # raise ValueError(f"No images found in {root} or its subdirectories.")
+class MAEImageNetDataset(Dataset):
+    def __init__(self,
+                 root,
+                 train=True,
+                 img_size=224,
+                 apply_blur_to_input=False,
+                 kernel_size=3,
+                 sigma=0.5,
+                 random_crop_scale=(0.2, 1.0),
+                 random_crop_ratio=(3./4., 4./3.),
+                 hflip_prob=0.5,
+                 norm_mean=[0.485, 0.456, 0.406],
+                 norm_std=[0.229, 0.224, 0.225]
+                 ):
+        self.root = root
+        self.train = train
+        self.img_size = img_size
+        self.apply_blur_to_input = apply_blur_to_input
+
+        try:
+            # Initialize ImageFolder just to easily get samples and loader
+            # We won't use its built-in transform directly in __getitem__
+            self.image_folder = datasets.ImageFolder(self.root)
+            if not self.image_folder.samples and is_main_process():
+                print(f"Warning: No images found in {self.root} or its subdirectories.")
+        except FileNotFoundError:
+            if is_main_process():
+                print(f"Error: Root directory not found: {self.root}")
+            raise
+        except Exception as e:
+             if is_main_process():
+                 print(f"Error initializing ImageFolder at {self.root}: {e}")
+             raise
+
+
+        # --- Store Geometric Transform Parameters ---
+        self.random_crop_scale = random_crop_scale
+        self.random_crop_ratio = random_crop_ratio
+        self.hflip_prob = hflip_prob
+        # Validation transforms (resize/crop) parameters
+        self.val_resize_size = int(img_size * 256 / 224) # Standard scaling
+
+        # --- Define Non-Geometric Transforms ---
+        # Blur (applied only to data path if needed, after geometric)
+        self.blur_transform = transforms.GaussianBlur(kernel_size, sigma=sigma) if apply_blur_to_input else nn.Identity()
+
+        # ToTensor and Normalize (applied to both data and gt at the end)
+        self.to_tensor = transforms.ToTensor()
+        self.normalize = transforms.Normalize(mean=norm_mean, std=norm_std)
+
+        if is_main_process():
+            print(f"Initialized MAEImageNetDataset for {'Training' if train else 'Validation'}")
+            print(f"  Root: {root}")
+            print(f"  Image Size: {img_size}")
+            print(f"  Apply Blur to Input: {apply_blur_to_input}")
+            if apply_blur_to_input:
+                print(f"    Blur Kernel Size: {kernel_size}")
+                print(f"    Blur Sigma: {sigma}")
+            print(f"  Random Crop Scale: {random_crop_scale}")
+            print(f"  Random Crop Ratio: {random_crop_ratio}")
+            print(f"  Horizontal Flip Prob: {hflip_prob}")
+            print(f"  Normalization Mean: {norm_mean}")
+            print(f"  Normalization Std: {norm_std}")
+
 
     def __getitem__(self, index):
-        # Initial check to avoid index error if folder is empty or path is wrong
+        # Error handling for index out of bounds (less likely with standard loaders but good practice)
         if index >= len(self.image_folder):
-             # This check might be less effective if multiple workers hit it simultaneously
-             # Consider a more robust check in the main process before starting workers
-             # if is_main_process(): # Avoid flooding logs
-             #      print(f"Warning: Index {index} out of bounds for dataset size {len(self.image_folder)}. Check dataset path and content.")
-             # Return dummy data or raise a specific error handled by the loader
-             return torch.zeros(3, 224, 224), torch.zeros(3, 224, 224) # Adjust shape/channels if needed
+             if is_main_process():
+                  print(f"Warning: Index {index} out of bounds for dataset size {len(self.image_folder)}.")
+             # Return dummy data or raise error
+             return torch.zeros(3, self.img_size, self.img_size), torch.zeros(3, self.img_size, self.img_size)
 
         path, _ = self.image_folder.samples[index]
         try:
-            original_img = self.image_folder.loader(path) # Loads as PIL RGB by default
+            original_img = self.image_folder.loader(path) # Loads as PIL RGB
         except Exception as e:
-             # Print error only once
-             if is_main_process():
-                 print(f"\nRank {dist.get_rank() if dist.is_initialized() else 0} FATAL: Error loading image {path}: {e}\n")
-             # Propagate error to potentially stop training
-             raise RuntimeError(f"Rank {dist.get_rank() if dist.is_initialized() else 0} Failed to load image {path}") from e
+             # Propagate error for DataLoader to handle potentially
+             raise RuntimeError(f"Failed to load image {path}") from e
 
-        data = self.transform(original_img)
-        gt = self.target_transform(original_img)
+        # --- Apply Geometric Transforms Synchronously ---
+        if self.train:
+            # 1. RandomResizedCrop
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                original_img, scale=self.random_crop_scale, ratio=self.random_crop_ratio
+            )
+            img_geom_transformed = F.resized_crop(original_img, 
+                                                  i, j, h, w, 
+                                                  [self.img_size, self.img_size], 
+                                                  interpolation=transforms.InterpolationMode.BICUBIC)
+
+            # 2. RandomHorizontalFlip
+            if random.random() < self.hflip_prob:
+                img_geom_transformed = F.hflip(img_geom_transformed)
+
+        else: # Validation transforms
+            img_resized = F.resize(
+                original_img, self.val_resize_size, interpolation=transforms.InterpolationMode.BICUBIC
+            )
+            img_geom_transformed = F.center_crop(img_resized, [self.img_size, self.img_size])
+
+        # --- Create Branches for data and gt ---
+        # Apply transforms after this point separately
+        # No need for .copy() as PIL transforms typically return new objects
+        data_intermediate = img_geom_transformed
+        gt_intermediate = img_geom_transformed
+
+        # --- Apply Input-Specific Transforms (to data path only) ---
+        # Blur happens AFTER geometric transforms, BEFORE ToTensor
+        data_intermediate = self.blur_transform(data_intermediate)
+        # Add other input-specific transforms like ColorJitter here if needed
+
+        # --- Apply Final Transforms (ToTensor, Normalize) ---
+        data = self.normalize(self.to_tensor(data_intermediate))
+        gt = self.normalize(self.to_tensor(gt_intermediate)) # gt uses the same geometric transform result
+
         return data, gt
 
     def __len__(self):
+        # Return the number of samples found by ImageFolder
         return len(self.image_folder)
 
 
@@ -294,8 +366,18 @@ def main(args):
         # Critical: Ensure dataset objects are created *before* checking their length or content,
         # especially with multiple workers. Path checks are done above.
         try:
-            train_dataset = MAEImageNetDataset(train_dir, train=True, img_size=args.img_size)
-            test_dataset = MAEImageNetDataset(val_dir, train=False, img_size=args.img_size)
+            train_dataset = MAEImageNetDataset(train_dir, 
+                                               train=True, 
+                                               img_size=args.img_size,
+                                               apply_blur_to_input=args.blur,
+                                               kernel_size=args.kernel_size,
+                                               sigma=args.sigma)
+            test_dataset = MAEImageNetDataset(val_dir, 
+                                              train=False, 
+                                              img_size=args.img_size,
+                                              apply_blur_to_input=args.blur,
+                                              kernel_size=args.kernel_size,
+                                              sigma=args.sigma)
             # Perform a basic check after creation on rank 0
             if is_main_process():
                 if len(train_dataset) == 0 or len(test_dataset) == 0:
@@ -317,7 +399,11 @@ def main(args):
              sys.exit(1)
         try:
             # Keep your existing custom dataset path logic
-            train_dataset = MAEDataset(args.data_path, args.blur, args.kernel_size, args.sigma, img_size=args.img_size)
+            train_dataset = MAEDataset(args.data_path, 
+                                       args.blur, 
+                                       args.kernel_size, 
+                                       args.sigma, 
+                                       img_size=args.img_size)
             val_data_path = args.data_path.replace('train', 'valid')
             if not os.path.isdir(val_data_path):
                  if is_main_process(): print(f"Validation path {val_data_path} not found, using train path for validation.")
@@ -434,7 +520,7 @@ def main(args):
     if is_main_process(): print(f"Optimizer: AdamW, LR: {effective_lr:.2e}, Weight Decay: {args.weight_decay}")
 
     # --- LR Scheduler ---
-    num_training_steps = args.end_epoch * len(train_dataloader)
+    num_training_steps = args.end_epoch * len(train_dataloader) * args.world_size
     warmup_steps = args.warmup_epochs * len(train_dataloader)
     if is_main_process():
         print(f"Total training steps (per GPU): {num_training_steps}")
@@ -656,7 +742,10 @@ def main(args):
             val_psnr_masked = AverageMeter()
 
             if is_main_process(): print(f'--- Validation Epoch {epoch_i + 1} ---')
-            val_bar = tqdm(test_dataloader, desc=f"Val", colour='blue', ncols=140,
+            val_bar = tqdm(test_dataloader, 
+                           desc=f"Val", 
+                           colour='blue', 
+                           ncols=140,
                            disable=not is_main_process())
             visible_batch_idx = random.randint(0, len(test_dataloader) - 1) if len(test_dataloader) > 0 else -1
 
@@ -673,7 +762,8 @@ def main(args):
                     gt_original = gt * std_tensor + mean_tensor
                     gt_original_clamped = torch.clamp(gt_original, 0., ORIGINAL_DATA_RANGE)
 
-                    pred_img_standardized = model_without_ddp.unpatchify(pred_patches.float(), in_chan=num_input_channels) # Ensure FP32
+                    pred_img_standardized = model_without_ddp.unpatchify(pred_patches.float(), 
+                                                                         in_chan=num_input_channels) # Ensure FP32
                     pred_original = pred_img_standardized * std_tensor + mean_tensor
                     pred_original_clamped = torch.clamp(pred_original, 0., ORIGINAL_DATA_RANGE)
 
@@ -796,7 +886,7 @@ def parse_args():
     parser.add_argument('--warmup_epochs', type=int, default=40, help='Warmup epochs')
     parser.add_argument('--save_dir', type=str, default='./mae_checkpoints_ddp_amp', help='Save directory') # Changed default slightly
     parser.add_argument('--num_workers', type=int, default=8, help='Data loading workers per GPU')
-    parser.add_argument('--seed', type=int, default=3407, help='Random seed')
+    parser.add_argument('--seed', type=int, default=717, help='Random seed')
     parser.add_argument('--eval_interval', type=int, default=10, help='Evaluation interval (in epochs)')
     parser.add_argument('--resume', type=str, default=None, help='Resume checkpoint path')
     parser.add_argument('--finetune', type=str, default=None, help='Finetune weights path')
@@ -827,7 +917,7 @@ if __name__ == "__main__":
     random.seed(seed)
 
     # These can impact reproducibility with AMP/DDP, but often boost performance
-    torch.backends.cudnn.deterministic = True # As per original, might hinder AMP perf
-    torch.backends.cudnn.benchmark = False   # As per original, set True for potential speedup if input sizes fixed
+    torch.backends.cudnn.deterministic = False # As per original, might hinder AMP perf
+    torch.backends.cudnn.benchmark = True   # As per original, set True for potential speedup if input sizes fixed
 
     main(args)

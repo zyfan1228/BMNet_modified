@@ -107,6 +107,7 @@ class MaskedAutoencoderViT(nn.Module):
         super().__init__()
 
         self.in_chan = in_chans
+        self.embed_dim = embed_dim
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
@@ -346,6 +347,15 @@ def mae_vit_huge_patch14_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(in_chans=1,
         patch_size=14, embed_dim=1280, depth=32, num_heads=16,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        norm_pix_loss=False, **kwargs)
+    return model
+
+# -- mine small --
+def mae_vit_small_patch16_dec192d4b(**kwargs):
+    model = MaskedAutoencoderViT(in_chans=3,
+        patch_size=16, embed_dim=384, depth=12, num_heads=6,
+        decoder_embed_dim=192, decoder_depth=4, decoder_num_heads=3,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         norm_pix_loss=False, **kwargs)
     return model

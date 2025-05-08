@@ -231,9 +231,9 @@ class MAEDatasetEval(Dataset):
 
         # Define the single transform pipeline for evaluation
         eval_transforms_list = [
-             transforms.Resize(int(img_size * 256 / 224), 
-                               interpolation=transforms.InterpolationMode.BICUBIC),
-            #  transforms.CenterCrop(img_size),
+            #  transforms.Resize(int(img_size * 256 / 224), 
+            #                    interpolation=transforms.InterpolationMode.BICUBIC),
+             transforms.CenterCrop(img_size),
              transforms.GaussianBlur(kernel_size, sigma=sigma) if apply_blur_to_input else nn.Identity(), # Blur applied to input if needed
              transforms.ToTensor(),
              transforms.Normalize(mean=CUSTOM_DATASET_MEAN, std=CUSTOM_DATASET_STD)
@@ -242,9 +242,9 @@ class MAEDatasetEval(Dataset):
 
         # GT transform is the same deterministic crop without blur
         self.eval_target_transform = transforms.Compose([
-             transforms.Resize(int(img_size * 256 / 224), 
-                               interpolation=transforms.InterpolationMode.BICUBIC),
-            #  transforms.CenterCrop(img_size),
+            #  transforms.Resize(int(img_size * 256 / 224), 
+            #                    interpolation=transforms.InterpolationMode.BICUBIC),
+             transforms.CenterCrop(img_size),
              transforms.ToTensor(),
              transforms.Normalize(mean=CUSTOM_DATASET_MEAN, std=CUSTOM_DATASET_STD)
         ])
